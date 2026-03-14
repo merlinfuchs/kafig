@@ -1,0 +1,7 @@
+[target.wasm32-wasip1]
+linker = "/opt/wasi-sdk/bin/wasm-ld"
+
+[env]
+CC_wasm32_wasip1 = "/opt/wasi-sdk/bin/clang"
+CXX_wasm32_wasip1 = "/opt/wasi-sdk/bin/clang++"
+AR_wasm32_wasip1 = "/opt/wasi-sdk/bin/llvm-ar"
