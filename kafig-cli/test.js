@@ -1,1 +1,1 @@
-host.result("test")
+"test"

@@ -136,6 +136,6 @@ const helpText = `Commands:
   .exit                        Exit the REPL
 
 Write JavaScript and press Enter to evaluate.
-Use host.result(value) to return a value.
+The result of the last expression is returned automatically.
 Use host.on(name, fn) to register event handlers.
 Variables and functions persist across evals.`

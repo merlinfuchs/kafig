@@ -126,7 +126,7 @@ func printInteractive(r result) {
 			fmt.Println(styleResult.Render("=> " + string(r.Value)))
 		}
 	} else {
-		fmt.Println(styleEmpty.Render("   (no result — host.result() was not called)"))
+		fmt.Println(styleEmpty.Render("   (no result)"))
 	}
 
 	if r.Stats != nil {

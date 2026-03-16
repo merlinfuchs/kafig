@@ -59,7 +59,7 @@ func TestEvalNoError(t *testing.T) {
 func TestEvalWithResult(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
-	result, err := inst.Eval(context.Background(), `host.result(1 + 2);`)
+	result, err := inst.Eval(context.Background(), `1 + 2`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestEvalWithResult(t *testing.T) {
 func TestEvalResultString(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
-	result, err := inst.Eval(context.Background(), `host.result("hello world");`)
+	result, err := inst.Eval(context.Background(), `"hello world"`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestEvalResultString(t *testing.T) {
 func TestEvalResultObject(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
-	result, err := inst.Eval(context.Background(), `host.result({a: 1, b: "two"});`)
+	result, err := inst.Eval(context.Background(), `({a: 1, b: "two"})`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestEvalResultObject(t *testing.T) {
 func TestEvalResultNull(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
-	result, err := inst.Eval(context.Background(), `host.result(undefined);`)
+	result, err := inst.Eval(context.Background(), `undefined`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -112,12 +112,14 @@ func TestEvalResultNull(t *testing.T) {
 func TestEvalNoResult(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
+	// const declarations have no completion value, so the result is
+	// JSON-serialized undefined → "null".
 	result, err := inst.Eval(context.Background(), `const x = 42;`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
-	if result != nil {
-		t.Errorf("got %s, want nil (no host.result() called)", result)
+	if string(result) != "null" {
+		t.Errorf("got %s, want null (const declaration has no completion value)", result)
 	}
 }
 
@@ -175,10 +177,9 @@ func TestEvalWithSingleRPC(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const val = await host.rpc("myMethod", {key: "value"});
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -205,12 +206,11 @@ func TestEvalWithMultipleRPCs(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		await host.rpc("set", {key: "a"});
 		await host.rpc("set", {key: "b"});
 		const val = await host.rpc("get", {key: "a"});
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -229,14 +229,13 @@ func TestEvalRPCError(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		try {
 			await host.rpc("doSomething", {});
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result(e.message);
-		}
-	})()`, WithAsync())
+			e.message;
+		}`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -252,9 +251,7 @@ func TestDispatchEventSync(t *testing.T) {
 
 	// Register a sync handler.
 	_, err := inst.Eval(context.Background(), `
-		host.on("add", (params) => {
-			host.result(params.a + params.b);
-		});
+		host.on("add", (params) => params.a + params.b);
 	`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
@@ -282,7 +279,7 @@ func TestDispatchEventAsync(t *testing.T) {
 	_, err := inst.Eval(context.Background(), `
 		host.on("fetch", async (params) => {
 			const val = await host.rpc("getData", params);
-			host.result(val);
+			return val;
 		});
 	`)
 	if err != nil {
@@ -310,7 +307,7 @@ func TestDispatchEventWithRPC(t *testing.T) {
 	_, err := inst.Eval(context.Background(), `
 		host.on("process", async (params) => {
 			const resp = await host.rpc("getData", {url: params.url});
-			host.result({ input: params.url, output: resp });
+			return { input: params.url, output: resp };
 		});
 	`)
 	if err != nil {
@@ -354,9 +351,7 @@ func TestDispatchMultipleEvents(t *testing.T) {
 	inst := newTestInstance(t, noopRouter())
 
 	_, err := inst.Eval(context.Background(), `
-		host.on("ping", (params) => {
-			host.result("pong " + params.n);
-		});
+		host.on("ping", (params) => "pong " + params.n);
 	`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
@@ -394,13 +389,13 @@ func TestMultipleInstances(t *testing.T) {
 	defer inst2.Close(context.Background())
 
 	// Set state in instance 1.
-	_, err = inst1.Eval(context.Background(), `globalThis.myVar = "instance1"; host.result(globalThis.myVar);`)
+	_, err = inst1.Eval(context.Background(), `globalThis.myVar = "instance1"`)
 	if err != nil {
 		t.Fatalf("Eval inst1: %v", err)
 	}
 
 	// Instance 2 should not see instance 1's state.
-	result, err := inst2.Eval(context.Background(), `host.result(globalThis.myVar ?? "undefined");`)
+	result, err := inst2.Eval(context.Background(), `globalThis.myVar ?? "undefined"`)
 	if err != nil {
 		t.Fatalf("Eval inst2: %v", err)
 	}
@@ -452,7 +447,7 @@ func TestInterruptClearedBetweenEvals(t *testing.T) {
 	}
 
 	// Next eval should work fine — clear_interrupt is called automatically.
-	result, err := inst.Eval(ctx, `host.result(42);`)
+	result, err := inst.Eval(ctx, `42`)
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -470,14 +465,13 @@ func TestEvalWithAsyncAwait(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		async function fetchData() {
 			const a = await host.rpc("getData", {id: 1});
 			const b = await host.rpc("getData", {id: 2});
 			return [a, b];
 		}
-		host.result(await fetchData());
-	})()`, WithAsync())
+		await fetchData()`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -493,11 +487,10 @@ func TestEvalPromiseChain(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const val = await host.rpc("getNumber");
 		const doubled = val * 2;
-		host.result(doubled);
-	})()`, WithAsync())
+		doubled`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -523,14 +516,13 @@ func TestPromiseAllRunsConcurrently(t *testing.T) {
 	inst := newTestInstance(t, router)
 
 	start := time.Now()
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const [a, b, c] = await Promise.all([
 			host.rpc("slowOp", {id: "1"}),
 			host.rpc("slowOp", {id: "2"}),
 			host.rpc("slowOp", {id: "3"}),
 		]);
-		host.result([a, b, c]);
-	})()`, WithAsync())
+		[a, b, c]`, WithAsync())
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -565,13 +557,12 @@ func TestPromiseAllWithMixedMethods(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const [a, b] = await Promise.all([
 			host.rpc("alpha"),
 			host.rpc("beta"),
 		]);
-		host.result({ a, b });
-	})()`, WithAsync())
+		({ a, b })`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -598,18 +589,17 @@ func TestPromiseAllWithPartialError(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		try {
 			await Promise.all([
 				host.rpc("op", {id: "good"}),
 				host.rpc("op", {id: "fail"}),
 				host.rpc("op", {id: "good2"}),
 			]);
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result(e.message);
-		}
-	})()`, WithAsync())
+			e.message;
+		}`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -635,7 +625,7 @@ func TestPreludeDefinesGlobals(t *testing.T) {
 	}
 	defer inst.Close(context.Background())
 
-	result, err := inst.Eval(context.Background(), `host.result(greet("world") + " v" + VERSION);`)
+	result, err := inst.Eval(context.Background(), `greet("world") + " v" + VERSION`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -658,7 +648,7 @@ func TestPreludeSharedAcrossInstances(t *testing.T) {
 			t.Fatalf("Instance %d: %v", i, err)
 		}
 
-		result, err := inst.Eval(context.Background(), `host.result(add(10, 20));`)
+		result, err := inst.Eval(context.Background(), `add(10, 20)`)
 		if err != nil {
 			t.Fatalf("Eval %d: %v", i, err)
 		}
@@ -690,7 +680,7 @@ func TestCloseOnContextDone(t *testing.T) {
 	}
 
 	// Verify the instance works before cancellation.
-	result, err := inst.Eval(context.Background(), `host.result(1 + 1);`)
+	result, err := inst.Eval(context.Background(), `1 + 1`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -703,7 +693,7 @@ func TestCloseOnContextDone(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// After close, Eval should fail.
-	_, err = inst.Eval(context.Background(), `host.result(1);`)
+	_, err = inst.Eval(context.Background(), `1`)
 	if err == nil {
 		t.Fatal("expected error after context cancellation closed the instance")
 	}
@@ -716,7 +706,7 @@ func TestCompileThenEval(t *testing.T) {
 	rt := newTestRuntime(t)
 	defer rt.Close(context.Background())
 
-	bytecode, err := rt.Compile(context.Background(), `host.result(10 * 5)`)
+	bytecode, err := rt.Compile(context.Background(), `10 * 5`)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -754,7 +744,7 @@ func TestCompileBytecodeReusedAcrossInstances(t *testing.T) {
 	rt := newTestRuntime(t)
 	defer rt.Close(context.Background())
 
-	bytecode, err := rt.Compile(context.Background(), `host.result(7 * 6)`)
+	bytecode, err := rt.Compile(context.Background(), `7 * 6`)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -785,7 +775,7 @@ func TestSyncRPC(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `host.result(host.rpcSync("getTime"));`)
+	result, err := inst.Eval(context.Background(), `host.rpcSync("getTime")`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -804,7 +794,7 @@ func TestSyncRPCWithParams(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `host.result(host.rpcSync("add", {A: 3, B: 7}));`)
+	result, err := inst.Eval(context.Background(), `host.rpcSync("add", {A: 3, B: 7})`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -823,9 +813,9 @@ func TestSyncRPCError(t *testing.T) {
 	result, err := inst.Eval(context.Background(), `
 		try {
 			host.rpcSync("fail");
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result(e.message);
+			e.message;
 		}
 	`)
 	if err != nil {
@@ -846,9 +836,9 @@ func TestSyncRPCMethodNotFound(t *testing.T) {
 	result, err := inst.Eval(context.Background(), `
 		try {
 			host.rpcSync("doesNotExist");
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result("caught");
+			"caught";
 		}
 	`)
 	if err != nil {
@@ -869,11 +859,10 @@ func TestMixedSyncAndAsyncRPC(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const t = host.rpcSync("getTime");
 		const d = await host.rpc("fetchData");
-		host.result({ time: t, data: d });
-	})()`, WithAsync())
+		({ time: t, data: d })`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -896,10 +885,9 @@ func TestSyncHandlerViaAsyncPath(t *testing.T) {
 		})
 
 	inst := newTestInstance(t, router)
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const val = await host.rpc("getTime");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -921,7 +909,7 @@ func TestReuseAfterError(t *testing.T) {
 	}
 
 	// Second call should succeed — state is clean.
-	result, err := inst.Eval(ctx, `host.result(42);`)
+	result, err := inst.Eval(ctx, `42`)
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -950,10 +938,9 @@ func TestReuseAfterInterrupt(t *testing.T) {
 	}
 
 	// Subsequent async eval with RPC should succeed.
-	result, err := inst.Eval(ctx, `(async () => {
+	result, err := inst.Eval(ctx, `
 		const val = await host.rpc("getData");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -975,14 +962,13 @@ func TestReuseAfterRPCError(t *testing.T) {
 	ctx := context.Background()
 
 	// First call: RPC handler returns error, JS catches it.
-	result, err := inst.Eval(ctx, `(async () => {
+	result, err := inst.Eval(ctx, `
 		try {
 			await host.rpc("failOp");
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result("caught: " + e.message);
-		}
-	})()`, WithAsync())
+			"caught: " + e.message;
+		}`, WithAsync())
 	if err != nil {
 		t.Fatalf("first eval: %v", err)
 	}
@@ -991,10 +977,9 @@ func TestReuseAfterRPCError(t *testing.T) {
 	}
 
 	// Second call: should succeed cleanly with a different RPC.
-	result, err = inst.Eval(ctx, `(async () => {
+	result, err = inst.Eval(ctx, `
 		const val = await host.rpc("okOp");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -1018,14 +1003,13 @@ func TestReuseAfterPanicInHandler(t *testing.T) {
 	ctx := context.Background()
 
 	// First call: handler panics — should be recovered as an error.
-	result, err := inst.Eval(ctx, `(async () => {
+	result, err := inst.Eval(ctx, `
 		try {
 			await host.rpc("panicOp");
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result(e.message);
-		}
-	})()`, WithAsync())
+			e.message;
+		}`, WithAsync())
 	if err != nil {
 		t.Fatalf("eval should succeed (panic caught as rejection), got: %v", err)
 	}
@@ -1034,10 +1018,9 @@ func TestReuseAfterPanicInHandler(t *testing.T) {
 	}
 
 	// Second call: should succeed cleanly.
-	result, err = inst.Eval(ctx, `(async () => {
+	result, err = inst.Eval(ctx, `
 		const val = await host.rpc("safeOp");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -1054,9 +1037,7 @@ func TestDispatchEventReuseManyTimes(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := inst.Eval(ctx, `
-		host.on("double", (params) => {
-			host.result(params.n * 2);
-		});
+		host.on("double", (params) => params.n * 2);
 	`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
@@ -1093,17 +1074,16 @@ func TestReuseAfterEarlyServiceLoopExit(t *testing.T) {
 
 	// Promise.all with a failing and a slow RPC. The failing one rejects
 	// Promise.all, JS catches it. Both RPCs are launched concurrently.
-	result, err := inst.Eval(ctx, `(async () => {
+	result, err := inst.Eval(ctx, `
 		try {
 			await Promise.all([
 				host.rpc("failOp"),
 				host.rpc("slowOp"),
 			]);
-			host.result("should not reach");
+			"should not reach";
 		} catch(e) {
-			host.result("caught: " + e.message);
-		}
-	})()`, WithAsync())
+			"caught: " + e.message;
+		}`, WithAsync())
 	if err != nil {
 		t.Fatalf("first eval: %v", err)
 	}
@@ -1115,10 +1095,9 @@ func TestReuseAfterEarlyServiceLoopExit(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Next call should succeed — no dangling state from the slow RPC.
-	result, err = inst.Eval(ctx, `(async () => {
+	result, err = inst.Eval(ctx, `
 		const val = await host.rpc("okOp");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("second eval should succeed, got: %v", err)
 	}
@@ -1163,7 +1142,7 @@ func TestInterruptCallbackNotTriggeredOnShortScript(t *testing.T) {
 		return instructions > 1_000_000
 	})
 
-	result, err := inst.Eval(context.Background(), `host.result(42);`)
+	result, err := inst.Eval(context.Background(), `42`)
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -1207,10 +1186,9 @@ func TestInterruptCallbackWithAsyncRPC(t *testing.T) {
 		return instructions > 1_000_000 // High threshold — shouldn't trigger.
 	})
 
-	result, err := inst.Eval(context.Background(), `(async () => {
+	result, err := inst.Eval(context.Background(), `
 		const val = await host.rpc("getData");
-		host.result(val);
-	})()`, WithAsync())
+		val`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
@@ -1235,12 +1213,11 @@ func TestInterruptCallbackCPUTimeDuringRPC(t *testing.T) {
 
 	// Do heavy computation after an RPC settles to verify CPU time tracks
 	// during the post-RPC JS continuation.
-	_, err := inst.Eval(context.Background(), `(async () => {
+	_, err := inst.Eval(context.Background(), `
 		await host.rpc("noop");
 		let sum = 0;
 		for (let i = 0; i < 100000; i++) { sum += i; }
-		host.result(sum);
-	})()`, WithAsync())
+		sum`, WithAsync())
 	if err != nil {
 		t.Fatalf("Eval: %v", err)
 	}

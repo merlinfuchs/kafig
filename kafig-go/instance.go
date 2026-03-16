@@ -51,7 +51,7 @@ type Instance struct {
 	scriptError *ScriptError
 	hasError    bool
 
-	// resultValue is set by hostSetResult when is_error=0 (from JS host.result()).
+	// resultValue is set by hostSetResult when is_error=0 (from the JS completion value).
 	resultValue json.RawMessage
 	hasResult   bool
 }
@@ -153,13 +153,11 @@ func (inst *Instance) Close(ctx context.Context) error {
 	return inst.runtime.Close(ctx)
 }
 
-// Eval evaluates a JavaScript source string globally. By default, evaluation is
-// synchronous — the source runs and returns immediately. Use WithAsync() to
-// drain the QuickJS job queue after evaluation, enabling promise resolution and
-// RPC calls.
-//
-// The returned json.RawMessage is the value passed to host.result() by the
-// guest, or nil if host.result() was not called.
+// Eval evaluates a JavaScript source string globally. The result of the last
+// expression is JSON-serialized and returned. Use WithAsync() to enable
+// top-level await (JS_EVAL_FLAG_ASYNC) and drain the QuickJS job queue after
+// evaluation, enabling promise resolution and RPC calls. When the last
+// expression is a Promise, its resolved value is returned.
 func (inst *Instance) Eval(ctx context.Context, source string, options ...EvalOption) (json.RawMessage, error) {
 	var opts evalOptions
 	for _, o := range options {
@@ -202,11 +200,10 @@ func (inst *Instance) Eval(ctx context.Context, source string, options ...EvalOp
 }
 
 // EvalCompiled evaluates previously compiled bytecode. The bytecode must have
-// been produced by [Runtime.Compile]. By default, evaluation is synchronous.
-// Use WithAsync() if the compiled source uses promises or RPC calls.
-//
-// The returned json.RawMessage is the value passed to host.result() by the
-// guest, or nil if host.result() was not called.
+// been produced by [Runtime.Compile]. The result of the last expression is
+// JSON-serialized and returned. Use WithAsync() if the compiled source uses
+// promises or RPC calls. If the bytecode was compiled with WithAsync(), the
+// result is the resolved value of the top-level Promise.
 func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options ...EvalOption) (json.RawMessage, error) {
 	var opts evalOptions
 	for _, o := range options {
@@ -249,11 +246,9 @@ func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options
 
 // DispatchEvent invokes a named event handler previously registered via
 // host.on(name, fn) during Eval. The paramsJSON is passed to the handler.
-// By default, the handler runs synchronously. Use WithAsync() if the handler
-// uses promises or RPC calls.
-//
-// The returned json.RawMessage is the value passed to host.result() by the
-// guest, or nil if host.result() was not called.
+// The handler's return value is JSON-serialized and returned. Use WithAsync()
+// if the handler returns a Promise or uses RPC calls — the resolved value of
+// the Promise is returned.
 func (inst *Instance) DispatchEvent(ctx context.Context, name string, paramsJSON json.RawMessage, options ...EvalOption) (json.RawMessage, error) {
 	var opts evalOptions
 	for _, o := range options {
@@ -535,8 +530,8 @@ func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload 
 }
 
 // hostSetResult is the host_set_result import. It handles both error reporting
-// (is_error=1, from Rust send_error) and result reporting (is_error=0, from
-// JS host.result()).
+// (is_error=1, from Rust send_error / promise_reject_cb) and result reporting
+// (is_error=0, from Rust send_result_value / promise_resolve_cb).
 func (inst *Instance) hostSetResult(_ context.Context, resultPtr, resultLen, isError uint32) {
 	resultJSON := inst.wasmReadCopy(resultPtr, resultLen)
 
