@@ -1268,3 +1268,211 @@ func TestInterruptCallbackCumulativeAcrossDispatches(t *testing.T) {
 	t.Logf("instructions: after first=%d, after second=%d", firstInstructions, instructionsAfterSecond)
 }
 
+// ─── Last-expression result & top-level await ────────────────────────────────
+
+func TestTopLevelAwaitWithoutRPC(t *testing.T) {
+	// Pure JS async — no host RPC involved.
+	inst := newTestInstance(t, noopRouter())
+
+	result, err := inst.Eval(context.Background(), `await Promise.resolve(42)`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != "42" {
+		t.Errorf("got %s, want 42", result)
+	}
+}
+
+func TestTopLevelAwaitChained(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	result, err := inst.Eval(context.Background(), `
+		const a = await Promise.resolve(10);
+		const b = await Promise.resolve(20);
+		a + b`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != "30" {
+		t.Errorf("got %s, want 30", result)
+	}
+}
+
+func TestAsyncModeWithSyncResult(t *testing.T) {
+	// WithAsync() but the script has no promises — result should still work.
+	inst := newTestInstance(t, noopRouter())
+
+	result, err := inst.Eval(context.Background(), `1 + 2`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != "3" {
+		t.Errorf("got %s, want 3", result)
+	}
+}
+
+func TestAsyncModeUndefinedResult(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	result, err := inst.Eval(context.Background(), `const x = 1;`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != "null" {
+		t.Errorf("got %s, want null", result)
+	}
+}
+
+func TestAsyncEvalUnhandledThrow(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		throw new Error("async boom")`, WithAsync())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var scriptErr *ScriptError
+	if !errors.As(err, &scriptErr) {
+		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	}
+	if scriptErr.Message != "async boom" {
+		t.Errorf("message = %q, want %q", scriptErr.Message, "async boom")
+	}
+}
+
+func TestAsyncEvalRejectedPromise(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		await Promise.reject(new Error("rejected"))`, WithAsync())
+	if err == nil {
+		t.Fatal("expected error from rejected promise")
+	}
+	var scriptErr *ScriptError
+	if !errors.As(err, &scriptErr) {
+		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	}
+	if scriptErr.Message != "rejected" {
+		t.Errorf("message = %q, want %q", scriptErr.Message, "rejected")
+	}
+}
+
+func TestCompiledBytecodeAsync(t *testing.T) {
+	router := NewRPCRouter().
+		WithAsync("double", func(_ context.Context, params json.RawMessage) (json.RawMessage, error) {
+			var p struct{ N int }
+			json.Unmarshal(params, &p)
+			result, _ := json.Marshal(p.N * 2)
+			return result, nil
+		})
+
+	rt, err := New(context.Background(), WithCompilationCache(testCache))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer rt.Close(context.Background())
+
+	bytecode, err := rt.Compile(context.Background(), `
+		const val = await host.rpc("double", {n: 21});
+		val`, WithAsync())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	inst, err := rt.Instance(context.Background(), WithRouter(router))
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	result, err := inst.EvalCompiled(context.Background(), bytecode, WithAsync())
+	if err != nil {
+		t.Fatalf("EvalCompiled: %v", err)
+	}
+	if string(result) != "42" {
+		t.Errorf("got %s, want 42", result)
+	}
+}
+
+func TestDispatchEventAsyncHandlerError(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		host.on("fail", async (params) => {
+			throw new Error("handler exploded");
+		});
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+
+	_, err = inst.DispatchEvent(context.Background(), "fail", json.RawMessage(`{}`), WithAsync())
+	if err == nil {
+		t.Fatal("expected error from handler")
+	}
+	var scriptErr *ScriptError
+	if !errors.As(err, &scriptErr) {
+		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	}
+	if scriptErr.Message != "handler exploded" {
+		t.Errorf("message = %q, want %q", scriptErr.Message, "handler exploded")
+	}
+}
+
+func TestDispatchEventAsyncHandlerRejectedPromise(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		host.on("reject", (params) => {
+			return Promise.reject(new Error("nope"));
+		});
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+
+	_, err = inst.DispatchEvent(context.Background(), "reject", json.RawMessage(`{}`), WithAsync())
+	if err == nil {
+		t.Fatal("expected error from rejected promise")
+	}
+	var scriptErr *ScriptError
+	if !errors.As(err, &scriptErr) {
+		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	}
+	if scriptErr.Message != "nope" {
+		t.Errorf("message = %q, want %q", scriptErr.Message, "nope")
+	}
+}
+
+func TestDispatchEventSyncHandlerReturnsObject(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		host.on("info", (params) => ({
+			name: params.name,
+			upper: params.name.toUpperCase(),
+			len: params.name.length,
+		}));
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+
+	result, err := inst.DispatchEvent(context.Background(), "info", json.RawMessage(`{"name":"kafig"}`))
+	if err != nil {
+		t.Fatalf("DispatchEvent: %v", err)
+	}
+
+	var res map[string]any
+	json.Unmarshal(result, &res)
+	if res["name"] != "kafig" {
+		t.Errorf("name = %v", res["name"])
+	}
+	if res["upper"] != "KAFIG" {
+		t.Errorf("upper = %v", res["upper"])
+	}
+	if res["len"] != float64(5) {
+		t.Errorf("len = %v", res["len"])
+	}
+}
+

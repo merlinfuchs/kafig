@@ -361,15 +361,17 @@ unsafe extern "C" fn promise_resolve_cb(
     unsafe {
         let val = if argc > 0 { *argv } else { qjs::JS_UNDEFINED };
         // JS_EVAL_FLAG_ASYNC wraps the completion value in {value: <result>}.
-        // Extract the inner value before serializing.
+        // Always unwrap by extracting the inner value before serializing.
         if qjs::JS_IsObject(val) {
-            let inner = qjs::JS_GetPropertyStr(ctx, val, c"value".as_ptr());
-            if !qjs::JS_IsUndefined(inner) {
+            let atom = qjs::JS_NewAtom(ctx, c"value".as_ptr());
+            let has = qjs::JS_HasProperty(ctx, val, atom);
+            qjs::JS_FreeAtom(ctx, atom);
+            if has > 0 {
+                let inner = qjs::JS_GetPropertyStr(ctx, val, c"value".as_ptr());
                 send_result_value(ctx, inner);
                 qjs::JS_FreeValue(ctx, inner);
                 return qjs::JS_UNDEFINED;
             }
-            qjs::JS_FreeValue(ctx, inner);
         }
         send_result_value(ctx, val);
         qjs::JS_UNDEFINED
