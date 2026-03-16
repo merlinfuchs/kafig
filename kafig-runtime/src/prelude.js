@@ -7,10 +7,8 @@
     // so user code cannot call them directly.
     const hostRpc = __host_rpc_native;
     const hostRpcSync = __host_rpc_sync_native;
-    const hostSetResult = __host_set_result_native;
     delete globalThis.__host_rpc_native;
     delete globalThis.__host_rpc_sync_native;
-    delete globalThis.__host_set_result_native;
 
     // ── Async RPC core ──────────────────────────────────────────────────────
     const pendingRpcs = new Map();
@@ -49,7 +47,7 @@
         if (!handler) {
             throw new Error('No handler registered for event: ' + name);
         }
-        handler(JSON.parse(paramsJson));
+        return handler(JSON.parse(paramsJson));
     }
 
     // ── Reset function for clearing stale state between dispatches ────
@@ -72,6 +70,5 @@
             return JSON.parse(hostRpcSync(method, JSON.stringify(params ?? null)));
         },
         on(name, handler) { eventHandlers.set(name, handler); },
-        result(value) { hostSetResult(JSON.stringify(value ?? null), false); },
     });
 })();

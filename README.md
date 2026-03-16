@@ -68,14 +68,12 @@ defer inst.Close(ctx)
 
 ```go
 // Synchronous (no promises, no RPC)
-result, err := inst.Eval(ctx, `host.result(1 + 2)`)
+result, err := inst.Eval(ctx, `1 + 2`)
 
-// Async (enables promise resolution and RPC processing)
+// Async (enables top-level await, promise resolution and RPC processing)
 result, err := inst.Eval(ctx, `
-    (async () => {
-        const data = await host.rpc("fetch", {url: "https://api.example.com"});
-        host.result(data);
-    })()
+    const data = await host.rpc("fetch", {url: "https://api.example.com"});
+    data
 `, kafig.WithAsync())
 ```
 
@@ -88,7 +86,7 @@ Scripts can register persistent event handlers that Go dispatches later:
 inst.Eval(ctx, `
     host.on("process", async (params) => {
         const result = await host.rpc("fetch", {url: params.url});
-        host.result(result);
+        return result;
     });
 `, kafig.WithAsync())
 
@@ -102,7 +100,7 @@ result, err := inst.DispatchEvent(ctx, "process",
 ### Pre-compiled Bytecode
 
 ```go
-bytecode, err := rt.Compile(ctx, `host.result(42)`)
+bytecode, err := rt.Compile(ctx, `42`)
 
 // Reuse across instances, skips parsing
 result, err := inst.EvalCompiled(ctx, bytecode, kafig.WithAsync())
@@ -124,25 +122,24 @@ Inside the sandbox, scripts have access to the `host` object:
 | ------------------------------ | --------------------------------------------------------------- |
 | `host.rpc(method, params)`     | Async RPC call to Go. Returns a Promise.                        |
 | `host.rpcSync(method, params)` | Sync RPC call to Go. Blocks until the handler returns.          |
-| `host.result(value)`           | Return a JSON-serializable value to the Go caller.              |
 | `host.on(name, fn)`            | Register an event handler callable from Go via `DispatchEvent`. |
+
+The result of an `Eval` call is the value of the last expression in the script (like a REPL). For `DispatchEvent`, it's the return value of the handler function. In async mode, if the result is a Promise, it's automatically awaited before being returned to Go.
 
 ## Sync vs Async Execution
 
-By default, `Eval`, `EvalCompiled`, and `DispatchEvent` run synchronously: the JS source executes and returns immediately with no promise resolution or RPC processing. This is the fast path for simple expressions and pure computation.
+By default, `Eval`, `EvalCompiled`, and `DispatchEvent` run synchronously: the JS source executes and returns immediately with no promise resolution or RPC processing. This is the fast path for simple expressions and pure computation. The return value is the result of the last expression.
 
-To enable promise resolution and RPC processing, pass `kafig.WithAsync()`. This tells kafig to drain the QuickJS microtask queue and service RPC calls in a loop until the script settles. No wrapping happens: your source runs at the top level as-is. If you need top-level `await`, wrap your code in an async IIFE yourself.
+To enable promise resolution and RPC processing, pass `kafig.WithAsync()`. This enables top-level `await` (via QuickJS's `JS_EVAL_FLAG_ASYNC`) and tells kafig to drain the microtask queue and service RPC calls in a loop until the script settles. If the last expression evaluates to a Promise, it's automatically awaited before the result is returned to Go.
 
 ```go
 // Sync: no promises, no RPC. Fast and simple.
-result, _ := inst.Eval(ctx, `host.result(1 + 2)`)
+result, _ := inst.Eval(ctx, `1 + 2`)
 
-// Async: enables promise resolution and RPC processing.
+// Async: enables top-level await, promise resolution and RPC processing.
 result, _ := inst.Eval(ctx, `
-    (async () => {
-        const data = await host.rpc("fetch", {url: "https://example.com"});
-        host.result(data);
-    })()
+    const data = await host.rpc("fetch", {url: "https://example.com"});
+    data
 `, kafig.WithAsync())
 ```
 
@@ -169,7 +166,7 @@ kafig-cli script.js
 kafig-cli -max-cpu-ms 1000 -max-opcodes 100000 script.js
 
 # JSON mode (stdin/stdout)
-echo '{"eval": "host.result(1 + 2)"}' | kafig-cli
+echo '{"eval": "1 + 2"}' | kafig-cli
 ```
 
 In the REPL, use `.dispatch <name> <json>` to dispatch events, `.reset` to reset the instance, and `.stats` to view execution statistics.
@@ -190,7 +187,7 @@ cd kafig-go && go test ./...
 
 **JSON as the wire format.** All data crossing the WASM boundary is UTF-8 JSON. This is simple, debuggable, and avoids the complexity of shared-memory serialization formats. The tradeoff is serialization overhead on large payloads, but for typical RPC parameters and results, JSON is fast enough and keeps the protocol straightforward.
 
-**Minimal JS API.** The guest-side API is intentionally small: `host.rpc`, `host.rpcSync`, `host.result`, and `host.on`. There is no way to expose Go functions directly into the JS global scope or call JS functions from Go by name. Everything goes through RPC calls or event handlers. This keeps the core simple and gives library users full control over the API surface they expose to scripts. You build your own JS API (helper functions, domain-specific abstractions) on top of these primitives, either via the prelude or using a bundle step for user scripts.
+**Minimal JS API.** The guest-side API is intentionally small: `host.rpc`, `host.rpcSync`, and `host.on`. There is no way to expose Go functions directly into the JS global scope or call JS functions from Go by name. Everything goes through RPC calls or event handlers. This keeps the core simple and gives library users full control over the API surface they expose to scripts. You build your own JS API (helper functions, domain-specific abstractions) on top of these primitives, either via the prelude or using a bundle step for user scripts.
 
 **No module system.** There is no `import`, `require`, or ES module support. Scripts run as top-level code in global scope. This is deliberate: module resolution adds complexity, filesystem access requirements, and attack surface. If you need to compose scripts, use a bundler like [esbuild](https://esbuild.github.io/) to bundle them into a single file.
 

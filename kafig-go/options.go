@@ -81,9 +81,11 @@ type evalOptions struct {
 // EvalOption configures a single Eval, EvalCompiled, or DispatchEvent call.
 type EvalOption func(*evalOptions)
 
-// WithAsync enables async evaluation. When set, the source is wrapped in an
-// async IIFE, allowing top-level await and RPC calls. Without this option,
-// evaluation is synchronous.
+// WithAsync enables async evaluation. For Eval, this sets JS_EVAL_FLAG_ASYNC so
+// that top-level await is supported and the last expression result is returned
+// as a resolved Promise value. For Compile, it bakes the async flag into the
+// bytecode. For all call types, it drains the QuickJS job queue and services
+// RPC calls after execution.
 func WithAsync() EvalOption {
 	return func(o *evalOptions) { o.async_ = true }
 }

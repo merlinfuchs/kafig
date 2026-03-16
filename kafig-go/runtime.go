@@ -56,7 +56,7 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 	// If a prelude is configured, compile it to bytecode now so each
 	// Instance can skip parsing.
 	if opts.prelude != "" {
-		bytecode, err := rt.compileBytecode(ctx, opts.prelude)
+		bytecode, err := rt.compileBytecode(ctx, opts.prelude, false)
 		if err != nil {
 			cache.Close(ctx)
 			return nil, fmt.Errorf("kafig: compile prelude: %w", err)
@@ -89,8 +89,16 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 // Compile compiles JavaScript source to QuickJS bytecode. The bytecode can be
 // passed to [Instance.EvalCompiled] to skip parsing on every call. Bytecode is
 // portable across all Instances from the same Runtime (same QuickJS version).
-func (r *Runtime) Compile(ctx context.Context, source string) ([]byte, error) {
-	return r.compileBytecode(ctx, source)
+//
+// Use WithAsync() if the source uses top-level await — this bakes
+// JS_EVAL_FLAG_ASYNC into the bytecode so that EvalCompiled returns a Promise
+// whose resolved value becomes the result.
+func (r *Runtime) Compile(ctx context.Context, source string, options ...EvalOption) ([]byte, error) {
+	var opts evalOptions
+	for _, o := range options {
+		o(&opts)
+	}
+	return r.compileBytecode(ctx, source, opts.async_)
 }
 
 // Close releases the compilation cache if it was created by this Runtime.
@@ -104,7 +112,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 
 // compileBytecode creates a temporary WASM instance, compiles the given source
 // to QuickJS bytecode via the compile() export, and returns the bytecode bytes.
-func (r *Runtime) compileBytecode(ctx context.Context, source string) ([]byte, error) {
+func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bool) ([]byte, error) {
 	// Create a temporary wazero runtime with the shared compilation cache.
 	wzr := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(r.cache))
 	defer wzr.Close(ctx)
@@ -149,8 +157,12 @@ func (r *Runtime) compileBytecode(ctx context.Context, source string) ([]byte, e
 	}
 	module.Memory().Write(ptr, sourceBytes)
 
-	// Call compile(ptr, len) → packed u64
-	results, err := fnCompile.Call(ctx, uint64(ptr), uint64(len(sourceBytes)))
+	// Call compile(ptr, len, is_async) → packed u64
+	isAsyncArg := uint64(0)
+	if isAsync {
+		isAsyncArg = 1
+	}
+	results, err := fnCompile.Call(ctx, uint64(ptr), uint64(len(sourceBytes)), isAsyncArg)
 	if err != nil {
 		return nil, fmt.Errorf("compile call: %w", err)
 	}

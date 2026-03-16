@@ -51,7 +51,7 @@ func BenchmarkEvalWithResult(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := inst.Eval(ctx, `host.result(42)`)
+		result, err := inst.Eval(ctx, `42`)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -69,7 +69,7 @@ func BenchmarkEvalCompiled(b *testing.B) {
 	}
 	ctx := context.Background()
 
-	bytecode, err := rt.Compile(ctx, `host.result(42)`)
+	bytecode, err := rt.Compile(ctx, `42`)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func BenchmarkEvalCompiled(b *testing.B) {
 }
 
 func BenchmarkEvalSourceVsCompiled(b *testing.B) {
-	const script = `{ let sum = 0; for (let i = 0; i < 100; i++) { sum += i; } host.result(sum); }`
+	const script = `{ let sum = 0; for (let i = 0; i < 100; i++) { sum += i; } sum; }`
 
 	b.Run("Source", func(b *testing.B) {
 		b.ReportAllocs()
@@ -147,7 +147,7 @@ func BenchmarkSyncRPC(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := inst.Eval(ctx, `host.result(host.rpcSync("echo", {v:1}))`)
+		result, err := inst.Eval(ctx, `host.rpcSync("echo", {v:1})`)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -167,10 +167,9 @@ func BenchmarkAsyncRPC(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := inst.Eval(ctx, `(async () => {
-			const r = await host.rpc("echo", {v:1});
-			host.result(r);
-		})()`, WithAsync())
+		result, err := inst.Eval(ctx, `
+			var r = await host.rpc("echo", {v:1});
+			r`, WithAsync())
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -195,10 +194,9 @@ func BenchmarkConcurrentRPCs(b *testing.B) {
 			for i := range calls {
 				calls[i] = fmt.Sprintf(`host.rpc("echo", {i:%d})`, i)
 			}
-			script := fmt.Sprintf(`(async () => {
-				const results = await Promise.all([%s]);
-				host.result(results.length);
-			})()`, strings.Join(calls, ","))
+			script := fmt.Sprintf(`
+				var results = await Promise.all([%s]);
+				results.length`, strings.Join(calls, ","))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -223,11 +221,10 @@ func BenchmarkRPCLargePayload(b *testing.B) {
 	ctx := context.Background()
 
 	// Build a ~10KB JSON payload in JS.
-	script := `(async () => {
-		const big = { data: "x".repeat(10000) };
-		const r = await host.rpc("echo", big);
-		host.result(r.data.length);
-	})()`
+	script := `
+		var big = { data: "x".repeat(10000) };
+		var r = await host.rpc("echo", big);
+		r.data.length`
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -250,9 +247,7 @@ func BenchmarkDispatchEvent(b *testing.B) {
 
 	// Register event handler.
 	_, err := inst.Eval(ctx, `
-		host.on("greet", (params) => {
-			host.result("hello " + params.name);
-		});
+		host.on("greet", (params) => "hello " + params.name);
 	`)
 	if err != nil {
 		b.Fatal(err)
@@ -284,7 +279,7 @@ func BenchmarkJSComputation(b *testing.B) {
 		result, err := inst.Eval(ctx, `{
 			let sum = 0;
 			for (let i = 0; i < 10000; i++) { sum += i; }
-			host.result(sum);
+			sum;
 		}`)
 		if err != nil {
 			b.Fatal(err)
