@@ -64,8 +64,7 @@ heap. Contexts are fully isolated from each other.
 1. Allocates a QuickJS `Runtime` with memory limit (32 MB) and stack limit (512 KB).
 2. Installs an interrupt handler that reads `INTERRUPT_FLAG`.
 3. Creates a full JS `Context`.
-4. Registers the native bridge functions `__host_rpc_native` and `__host_set_result_native`
-   as QuickJS globals.
+4. Registers the native bridge function `__host_rpc_native` as a QuickJS global.
 5. Evaluates the prelude (see below).
 6. Drains the microtask queue (`execute_pending_job` until empty).
 7. Stores the `JsRuntime` in a `OnceLock<JsRuntime>` static.
@@ -113,49 +112,48 @@ WASM retains ownership of these buffers; Go never frees them.
 
 These are the functions the Go host calls on the WASM module.
 
-### `eval(ptr: i32, len: i32) → ()`
+### `eval(ptr: i32, len: i32, is_async: i32) → ()`
 
 Evaluates a UTF-8 JavaScript source string.
 
 **Preconditions:** `ptr` is a valid WASM allocation of at least `len` bytes, written by Go.
 
+**Parameters:**
+- `ptr`, `len` — pointer and length of the source string in WASM linear memory.
+- `is_async` — when non-zero, adds `JS_EVAL_FLAG_ASYNC` to enable top-level `await`.
+
 **What happens inside:**
 
 1. Reads source from linear memory as a UTF-8 string.
-2. Wraps the source in an async IIFE:
-   ```js
-   (async function __kafig_main() {
-       try {
-           const __result = await (async function() { <source> })();
-           __host_set_result_native(JSON.stringify(__result ?? null), false);
-       } catch(e) {
-           __host_set_result_native(JSON.stringify({
-               error: e?.message ?? String(e),
-               errorType: __classifyError(e),
-               stack: e?.stack ?? null,
-           }), true);
-       }
-   })();
-   ```
-3. Calls `ctx.eval_promise(wrapped)` — this schedules the async IIFE as a microtask and
-   returns immediately (the promise is not yet settled).
-4. Drains the microtask queue with `execute_pending_job` until empty.
+2. Calls `JS_Eval()` with flags `JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT` (plus
+   `JS_EVAL_FLAG_ASYNC` if `is_async` is set).
+3. If the eval throws (returns an exception), Rust extracts the error details and calls
+   `host_set_result` with `is_error=1`.
+4. Otherwise, Rust processes the return value:
+   - **Sync mode** (`is_async=0`): The return value is JSON-stringified and sent via
+     `host_set_result` with `is_error=0`.
+   - **Async mode** (`is_async=1`): If the return value is a Promise, Rust attaches
+     `.then(resolve, reject)` callbacks using `JS_NewCFunction2`. These callbacks
+     JSON-stringify the settled value and call `host_set_result`. The microtask queue
+     is drained to let the promise settle. If the return value is not a Promise, it's
+     JSON-stringified immediately.
+5. Drains the microtask queue with `execute_pending_job` until empty.
 
-At step 4 the microtask queue may be empty because the script hit an `await` for a host
+At step 5 the microtask queue may be empty because the script hit an `await` for a host
 RPC (a pending promise). In that case `eval` returns to Go with work still in progress —
 Go continues servicing RPCs until `host_set_result` fires (see Full Execution Flow).
 
-If `eval_promise` itself throws synchronously (e.g. a parse error), WASM calls
-`host_set_result` directly with `is_error=1` before returning.
+**Result capture:** The result is the value of the last expression in the script (like a
+REPL). For async mode with Promises, `JS_EVAL_FLAG_ASYNC` wraps the completion value in
+a `{value: <result>}` object — the resolve callback unwraps this before serializing.
 
 **Memory:** Go allocates before calling, Go frees after `eval` returns.
 
-**Completion signal:** `host_set_result` (a host import) is called by the JS wrapper when
-the async IIFE settles — either successfully or with an error. This may happen synchronously
-inside `eval` (if the script has no `await`s) or inside a later `resolve_rpc`/`reject_rpc`
-call.
+**Completion signal:** `host_set_result` (a host import) is called by the Rust result
+processing code — either synchronously inside `eval` (for sync results) or via Promise
+settlement callbacks triggered during `resolve_rpc`/`reject_rpc`.
 
-### `dispatch_event(name_ptr: i32, name_len: i32, params_ptr: i32, params_len: i32) → ()`
+### `dispatch_event(name_ptr: i32, name_len: i32, params_ptr: i32, params_len: i32, is_async: i32) → ()`
 
 Invokes a named event handler previously registered by the JS script via `host.on(name, fn)`.
 
@@ -164,36 +162,33 @@ Invokes a named event handler previously registered by the JS script via `host.o
   `host_set_result` has fired for the eval).
 - A handler for `name` has been registered by the script.
 
+**Parameters:**
+- `name_ptr`, `name_len` — pointer and length of the event name in WASM linear memory.
+- `params_ptr`, `params_len` — pointer and length of the JSON params in WASM linear memory.
+- `is_async` — when non-zero, enables Promise settlement for async handlers.
+
 **What happens inside:**
 
 1. Reads `name` and `params` JSON from linear memory.
-2. Looks up the handler in `__eventHandlers`. If not found, calls `host_set_result` with a
-   `runtime_error` and returns.
-3. Invokes the handler wrapped in an async IIFE identical in structure to `eval`'s wrapper:
-   ```js
-   (async function __kafig_event() {
-       try {
-           const __result = await __eventHandlers.get(name)(JSON.parse(paramsJson));
-           __host_set_result_native(JSON.stringify(__result ?? null), false);
-       } catch(e) {
-           __host_set_result_native(JSON.stringify({
-               error: e?.message ?? String(e),
-               errorType: __classifyError(e),
-               stack: e?.stack ?? null,
-           }), true);
-       }
-   })();
-   ```
-4. Drains the microtask queue until empty.
+2. Calls the JS `__dispatch_event(name, paramsJson)` function, which looks up the handler
+   in `__eventHandlers` and calls it with `JSON.parse(paramsJson)`.
+3. If the handler is not found, calls `host_set_result` with a `runtime_error` and returns.
+4. Captures the handler's return value and processes it through the same result pipeline
+   as `eval`: if it's a Promise (and `is_async` is set), Rust attaches `.then`/`.catch`
+   callbacks; otherwise the value is JSON-stringified immediately.
+5. Drains the microtask queue until empty.
 
 The handler may itself call host APIs via `await host.*`. In that case `dispatch_event`
 returns to Go with work in progress, and Go continues the same RPC service loop until
 `host_set_result` fires — exactly as with `eval`.
 
+**Result capture:** The result is the return value of the handler function. For async
+handlers that return a Promise, the promise is awaited and its resolved value is returned.
+
 **Memory:** Go allocates both name and params before calling, Go frees both after
 `dispatch_event` returns.
 
-**Completion signal:** Same as `eval` — `host_set_result` fires when the handler settles.
+**Completion signal:** Same as `eval` — `host_set_result` fires when the result is ready.
 
 ### `resolve_rpc(promise_id: i32, ptr: i32, len: i32) → ()`
 
@@ -238,14 +233,11 @@ import module name `"env"`.
 
 ### `host_rpc(method_ptr, method_len, params_ptr, params_len, promise_id: i32) → ()`
 
-Called by JS (via `__host_rpc_native`) whenever user code calls a host API:
+Called by JS (via `__host_rpc_native`) whenever user code calls `host.rpc` or `host.rpcSync`:
 
 ```js
-host.fetch(url);          // method="fetch",  params={"url":...}
-host.log(msg);            // method="log",    params={"msg":...}
-host.kv.get(key);         // method="kv.get", params={"key":...}
-host.kv.set(key, val);    // method="kv.set", params={"key":...,"value":...}
-host.kv.delete(key);      // method="kv.del", params={"key":...}
+await host.rpc("fetch", {url});         // async RPC, returns a Promise
+host.rpcSync("now", {});                // sync RPC, blocks until handler returns
 ```
 
 Parameters:
@@ -265,11 +257,11 @@ happens after the originating WASM call returns.
 
 ### `host_set_result(result_ptr, result_len: i32, is_error: i32) → ()`
 
-Called by the JS wrapper (`__host_set_result_native`) when an async IIFE settles —
-either the `eval` wrapper or the `dispatch_event` wrapper.
+Called by the Rust result processing code when an execution unit produces a result —
+either from direct eval return values, Promise settlement callbacks, or error handling.
 
 - `result_ptr/len` — UTF-8 JSON string in WASM memory.
-  - On success: the JSON-serialized return value of the script or handler (or `null`).
+  - On success: the JSON-serialized result value (or `"null"` for undefined/void).
   - On error: `{"error": "...", "errorType": "...", "stack": "..."}`.
 - `is_error` — `0` for success, `1` for error.
 
@@ -297,10 +289,10 @@ initial state. It installs the following globals:
 | `__make_rpc_promise(method, params)`          | function                      | Creates a promise, registers it in `__pendingRpcs`, calls `__host_rpc_native`.                        |
 | `__resolve_rpc(id, resultJson)`               | function                      | Settles a pending promise with success.                                                               |
 | `__reject_rpc(id, errorJson)`                 | function                      | Settles a pending promise with rejection.                                                             |
+| `__dispatch_event(name, paramsJson)`          | function                      | Looks up handler in `__eventHandlers`, calls it, returns the result.                                  |
 | `__host_rpc_native(method, paramsJson, id)`   | native fn                     | Thin bridge to the `host_rpc` import. Passes JS strings as raw pointers into WASM linear memory.     |
-| `__host_set_result_native(resultJson, isErr)` | native fn                     | Thin bridge to the `host_set_result` import.                                                          |
 | `__classifyError(err)`                        | function                      | Maps QuickJS exception types to error type strings.                                                   |
-| `host`                                        | object                        | Public API surface: `host.log`, `host.fetch`, `host.kv.*`, `host.on(name, handler)`.                 |
+| `host`                                        | object                        | Public API surface: `host.rpc`, `host.rpcSync`, `host.on(name, handler)`.                            |
 
 ### `host.on(name, handler)`
 
@@ -310,7 +302,7 @@ top-level `eval` execution before any `dispatch_event` calls.
 
 ```js
 host.on('message', async ({ topic, payload }) => {
-    const response = await host.fetch(`https://api.example.com/${topic}`, { body: payload });
+    const response = await host.rpc('fetch', { url: `https://api.example.com/${topic}`, body: payload });
     return response;
 });
 ```
@@ -340,17 +332,17 @@ Go                              WASM / QuickJS
 clear_interrupt()
 alloc(len(source)) → ptr
 mem.Write(ptr, source)
-eval(ptr, len)
-  │                             wrap source in async IIFE
-  │                             eval_promise(wrapped)  ← schedules IIFE as microtask
-  │                             execute_pending_job()  ← runs IIFE synchronously until:
-  │                               ...user code hits `await host.fetch(url)`
+eval(ptr, len, is_async)
+  │                             JS_Eval(source, flags)
+  │                             execute_pending_job()  ← runs code synchronously until:
+  │                               ...user code hits `await host.rpc("fetch", ...)`
   │                               __make_rpc_promise("fetch", params)
   │                                 registers promise id=1 in __pendingRpcs
   │                                 __host_rpc_native("fetch", paramsJson, 1)
   │◄────────────────────────── host_rpc("fetch", paramsJson, id=1)
   │  (copy method+params, store pending {id:1}, return)
   │                             (promise unresolved; microtask queue empty)
+  │                             Rust: result is a Promise → attach .then/.catch callbacks
   │                             eval returns
 dealloc(ptr, len)
 
@@ -366,9 +358,9 @@ resolve_rpc(1, ptr2, len(responseJson))
   │                             execute_pending_job()  ← resumes the awaiting code
   │                               ...user code continues after `await`
   │                               ...script registers event handlers via host.on(...)
-  │                               ...script returns a value or throws
-  │                               __host_set_result_native(resultJson, isError)
-  │◄────────────────────────── host_set_result(resultJson, isError)
+  │                               ...Promise settles → Rust resolve callback fires
+  │                               callback JSON-stringifies result → host_set_result
+  │◄────────────────────────── host_set_result(resultJson, 0)
   │  (copy result, signal completion, return)
   │                             execute_pending_job()  ← drain remaining microtasks
   │                             resolve_rpc returns
@@ -388,14 +380,14 @@ alloc(len(name)) → namePtr
 alloc(len(params)) → paramsPtr
 mem.Write(namePtr, "message")
 mem.Write(paramsPtr, paramsJson)
-dispatch_event(namePtr, nameLen, paramsPtr, paramsLen)
-  │                             look up __eventHandlers.get("message")
-  │                             wrap handler call in async IIFE
-  │                             eval_promise(wrapped)
-  │                             execute_pending_job()  ← runs handler until:
-  │                               ...handler hits `await host.fetch(...)`
+dispatch_event(namePtr, nameLen, paramsPtr, paramsLen, is_async)
+  │                             call __dispatch_event("message", paramsJson)
+  │                               handler = __eventHandlers.get("message")
+  │                               handler(JSON.parse(paramsJson))
+  │                               ...handler hits `await host.rpc("fetch", ...)`
   │◄────────────────────────── host_rpc("fetch", paramsJson, id=2)
   │  (copy, store pending {id:2}, return)
+  │                             Rust: handler returned a Promise → attach callbacks
   │                             dispatch_event returns
 dealloc(namePtr); dealloc(paramsPtr)
 
@@ -404,7 +396,8 @@ mem.Write(ptr3, responseJson)
 resolve_rpc(2, ptr3, len(responseJson))
   │                             entry.resolve(JSON.parse(responseJson))
   │                             execute_pending_job()  ← handler resumes, returns value
-  │                               __host_set_result_native(resultJson, false)
+  │                               Promise settles → Rust resolve callback fires
+  │                               callback JSON-stringifies result → host_set_result
   │◄────────────────────────── host_set_result(resultJson, 0)
   │  (copy result, signal completion, return)
   │                             resolve_rpc returns
@@ -427,8 +420,8 @@ Go (timer goroutine)         WASM / QuickJS
 set_interrupt()
                              (QuickJS interrupt handler fires on next opcode)
                              throws InternalError("interrupted")
-                             caught by __kafig_main / __kafig_event try/catch
-                             __host_set_result_native({"errorType":"cpu_limit_exceeded",...}, true)
+                             Rust catches the exception, extracts error details
+                             host_set_result({"errorType":"cpu_limit_exceeded",...}, 1)
 ◄─────────────────────────── host_set_result(...)
 ```
 
