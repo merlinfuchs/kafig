@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/merlinfuchs/kafig/kafig-go/internal/wasm"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
@@ -56,7 +55,7 @@ type Instance struct {
 	hasResult   bool
 }
 
-func newInstance(ctx context.Context, cache wazero.CompilationCache, opts instanceOptions) (*Instance, error) {
+func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes []byte, opts instanceOptions) (*Instance, error) {
 	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(cache))
 
 	inst := &Instance{
@@ -80,7 +79,7 @@ func newInstance(ctx context.Context, cache wazero.CompilationCache, opts instan
 	}
 
 	// Compile (hits the cache) and instantiate.
-	compiled, err := r.CompileModule(ctx, wasm.RuntimeWasm)
+	compiled, err := r.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return nil, fmt.Errorf("kafig: compile module: %w", err)
 	}

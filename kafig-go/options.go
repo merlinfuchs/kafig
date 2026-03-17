@@ -8,6 +8,7 @@ import (
 
 // runtimeOptions holds configuration for a Runtime and its Instances.
 type runtimeOptions struct {
+	module             []byte // custom WASM binary; nil = use embedded default
 	prelude            string
 	preludeBytecode    []byte // compiled by New(), used by each Instance
 	logger             *slog.Logger
@@ -17,6 +18,14 @@ type runtimeOptions struct {
 
 // RuntimeOption configures a Runtime created with New.
 type RuntimeOption func(*runtimeOptions)
+
+// WithModule sets a custom WASM binary to use instead of the embedded default.
+// The binary must export the same functions as the kafig-runtime module (alloc,
+// dealloc, eval, eval_compiled, dispatch_event, etc.) and import the "env"
+// host functions (host_rpc, host_set_result, host_rpc_sync, host_should_interrupt).
+func WithModule(data []byte) RuntimeOption {
+	return func(o *runtimeOptions) { o.module = data }
+}
 
 // WithPrelude sets a JavaScript source string that is evaluated synchronously
 // on every new Instance before any user Eval calls. Use this to define global

@@ -15,6 +15,7 @@ import (
 // wazero.Runtime (required for per-instance host function bindings) but the
 // expensive compilation step is shared via the cache.
 type Runtime struct {
+	module   []byte // WASM binary (custom or embedded default)
 	cache    wazero.CompilationCache
 	ownCache bool // true if we created the cache and should close it
 	opts     runtimeOptions
@@ -33,6 +34,13 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 		o(&opts)
 	}
 
+	// Resolve the WASM binary: use the custom module if provided, otherwise
+	// fall back to the embedded default.
+	module := opts.module
+	if module == nil {
+		module = wasm.RuntimeWasm
+	}
+
 	cache := opts.compilationCache
 	ownCache := cache == nil
 	if ownCache {
@@ -46,12 +54,12 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 			WithCloseOnContextDone(opts.closeOnContextDone).
 			WithCompilationCache(cache),
 	)
-	if _, err := r.CompileModule(ctx, wasm.RuntimeWasm); err != nil {
+	if _, err := r.CompileModule(ctx, module); err != nil {
 		return nil, fmt.Errorf("kafig: compile module: %w", err)
 	}
 	r.Close(ctx)
 
-	rt := &Runtime{cache: cache, ownCache: ownCache, opts: opts}
+	rt := &Runtime{module: module, cache: cache, ownCache: ownCache, opts: opts}
 
 	// If a prelude is configured, compile it to bytecode now so each
 	// Instance can skip parsing.
@@ -83,7 +91,7 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 		return nil, fmt.Errorf("kafig: RPCRouter is required (use WithRouter)")
 	}
 
-	return newInstance(ctx, r.cache, opts)
+	return newInstance(ctx, r.cache, r.module, opts)
 }
 
 // Compile compiles JavaScript source to QuickJS bytecode. The bytecode can be
@@ -131,7 +139,7 @@ func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bo
 		return nil, fmt.Errorf("register host module: %w", err)
 	}
 
-	compiled, err := wzr.CompileModule(ctx, wasm.RuntimeWasm)
+	compiled, err := wzr.CompileModule(ctx, r.module)
 	if err != nil {
 		return nil, fmt.Errorf("compile module: %w", err)
 	}
