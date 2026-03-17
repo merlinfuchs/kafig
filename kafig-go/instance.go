@@ -404,6 +404,14 @@ func (inst *Instance) launchPendingRPCs(ctx context.Context, results chan<- rpcR
 				h, ok = inst.router.syncHandlers[r.Method]
 			}
 			if !ok {
+				if inst.router.fallbackHandler != nil {
+					value, err := inst.router.fallbackHandler(ctx, r.Method, r.Params)
+					select {
+					case results <- rpcResult{PromiseID: r.PromiseID, Value: value, Err: err}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				select {
 				case results <- rpcResult{PromiseID: r.PromiseID, Err: fmt.Errorf("method %q not registered", r.Method)}:
 				case <-ctx.Done():
@@ -492,9 +500,21 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 
 	inst.logDebug("sync rpc call", "method", method)
 
-	// Look up sync handler.
+	// Look up sync handler, falling back to the catch-all fallback.
 	h, ok := inst.router.syncHandlers[method]
 	if !ok {
+		if inst.router.fallbackHandler != nil {
+			result, err := inst.router.fallbackHandler(ctx, method, params)
+			if err != nil {
+				inst.logDebug("sync rpc fallback error", "method", method, "error", err)
+				return inst.writeSyncRPCResult(ctx, 1, []byte(err.Error()))
+			}
+			if result == nil {
+				result = json.RawMessage("null")
+			}
+			inst.logDebug("sync rpc fallback resolved", "method", method)
+			return inst.writeSyncRPCResult(ctx, 0, result)
+		}
 		return inst.writeSyncRPCResult(ctx, 1,
 			[]byte(fmt.Sprintf("method %q not registered for sync RPC", method)))
 	}

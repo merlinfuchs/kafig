@@ -12,6 +12,11 @@ import (
 // DispatchEvent call.
 type RPCCallback func(ctx context.Context, params json.RawMessage) (json.RawMessage, error)
 
+// RPCFallbackCallback is called when no specific handler is registered for a
+// method. It receives the method name in addition to params, allowing a single
+// handler to process any unhandled RPC call.
+type RPCFallbackCallback func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error)
+
 // RPCRouter dispatches RPC calls to registered handlers. Sync handlers
 // (registered via WithSync) are called inline during WASM execution with no
 // goroutine overhead — ideal for fast, pure-compute calls like "get time".
@@ -23,8 +28,9 @@ type RPCCallback func(ctx context.Context, params json.RawMessage) (json.RawMess
 // handlers. When called via host.rpcSync() (sync JS API), only sync handlers
 // are checked.
 type RPCRouter struct {
-	syncHandlers  map[string]RPCCallback
-	asyncHandlers map[string]RPCCallback
+	syncHandlers    map[string]RPCCallback
+	asyncHandlers   map[string]RPCCallback
+	fallbackHandler RPCFallbackCallback
 }
 
 // NewRPCRouter creates an empty RPCRouter.
@@ -47,6 +53,14 @@ func (r *RPCRouter) WithSync(method string, handler RPCCallback) *RPCRouter {
 // settlement loop.
 func (r *RPCRouter) WithAsync(method string, handler RPCCallback) *RPCRouter {
 	r.asyncHandlers[method] = handler
+	return r
+}
+
+// WithFallback registers a catch-all handler that is invoked when no specific
+// sync or async handler is registered for the requested method. This is useful
+// for forwarding unhandled RPC calls to an external system.
+func (r *RPCRouter) WithFallback(handler RPCFallbackCallback) *RPCRouter {
+	r.fallbackHandler = handler
 	return r
 }
 
