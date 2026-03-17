@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/elk-language/go-prompt v1.2.0
-	github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260316231103-4c7153a33717
+	github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260317095852-c68510921659
 )
 
 require (
