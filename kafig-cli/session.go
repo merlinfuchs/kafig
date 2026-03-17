@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 
 	kafig "github.com/merlinfuchs/kafig/kafig-go"
+	"github.com/tetratelabs/wazero"
 )
 
 // command represents a parsed user action, produced by both interactive and JSON input parsing.
@@ -29,17 +33,36 @@ type session struct {
 	rt          *kafig.Runtime
 	inst        *kafig.Instance
 	rpcFallback kafig.RPCFallbackCallback
+	cache       wazero.CompilationCache // nil when falling back to in-memory
 }
 
 func newSession(ctx context.Context) (*session, error) {
-	rt, err := kafig.New(ctx)
+	s := &session{}
+
+	// Try to create a persistent file-based compilation cache so the WASM
+	// module doesn't have to be recompiled on every CLI invocation.
+	var opts []kafig.RuntimeOption
+	if cache, err := newFileCache(); err != nil {
+		log.Printf("warning: falling back to in-memory compilation cache: %v", err)
+	} else {
+		s.cache = cache
+		opts = append(opts, kafig.WithCompilationCache(cache))
+	}
+
+	rt, err := kafig.New(ctx, opts...)
 	if err != nil {
+		if s.cache != nil {
+			s.cache.Close(ctx)
+		}
 		return nil, fmt.Errorf("failed to create runtime: %w", err)
 	}
 
-	s := &session{rt: rt}
+	s.rt = rt
 	if err := s.reset(ctx); err != nil {
 		rt.Close(ctx)
+		if s.cache != nil {
+			s.cache.Close(ctx)
+		}
 		return nil, fmt.Errorf("failed to create instance: %w", err)
 	}
 	return s, nil
@@ -52,6 +75,23 @@ func (s *session) close(ctx context.Context) {
 	if s.rt != nil {
 		s.rt.Close(ctx)
 	}
+	if s.cache != nil {
+		s.cache.Close(ctx)
+	}
+}
+
+// newFileCache creates a wazero compilation cache backed by a directory under
+// the OS-specific user cache location (e.g. ~/.cache/kafig/wasm-cache on Linux).
+func newFileCache() (wazero.CompilationCache, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("get user cache dir: %w", err)
+	}
+	dir := filepath.Join(base, "kafig", "wasm-cache")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create cache dir: %w", err)
+	}
+	return wazero.NewCompilationCacheWithDir(dir)
 }
 
 func (s *session) reset(ctx context.Context) error {
