@@ -38,6 +38,13 @@ func runInteractive(ctx context.Context) {
 	}
 	defer sess.close(context.Background())
 
+	forwarder := newInteractiveRPCForwarder()
+	sess.rpcFallback = forwarder.Forward
+	if err := sess.reset(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Println(styleBanner.Render("kafig") + " interactive JavaScript runtime")
 	fmt.Println(styleStats.Render("Type .help for commands, Ctrl+D to exit"))
 	fmt.Println()

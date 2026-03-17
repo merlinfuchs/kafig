@@ -12,9 +12,10 @@ import (
 )
 
 type jsonInput struct {
-	Eval     string        `json:"eval,omitempty"`
-	Dispatch *jsonDispatch `json:"dispatch,omitempty"`
-	Reset    bool          `json:"reset,omitempty"`
+	Eval        string          `json:"eval,omitempty"`
+	Dispatch    *jsonDispatch   `json:"dispatch,omitempty"`
+	Reset       bool            `json:"reset,omitempty"`
+	RPCResponse *rpcResponseMsg `json:"rpc_response,omitempty"`
 }
 
 type jsonDispatch struct {
@@ -49,15 +50,54 @@ func runJSON(ctx context.Context) {
 	}
 	defer sess.close(context.Background())
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	for scanner.Scan() {
-		cmd, parseErr := parseJSON(scanner.Bytes())
-		if parseErr != nil {
-			printJSON(result{Error: parseErr})
-			continue
+	forwarder := newRPCForwarder(os.Stdout)
+	sess.rpcFallback = forwarder.Forward
+	// Re-create instance so the fallback is wired into the router.
+	if err := sess.reset(ctx); err != nil {
+		printJSON(result{Error: err})
+		os.Exit(1)
+	}
+
+	commands := make(chan command)
+	parseErrors := make(chan error)
+
+	// Reader goroutine: reads STDIN lines and routes them.
+	go func() {
+		defer close(commands)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+		for scanner.Scan() {
+			var input jsonInput
+			if err := json.Unmarshal(scanner.Bytes(), &input); err != nil {
+				parseErrors <- fmt.Errorf("invalid JSON input: %w", err)
+				continue
+			}
+
+			// Route RPC responses to the forwarder.
+			if input.RPCResponse != nil {
+				forwarder.Deliver(*input.RPCResponse)
+				continue
+			}
+
+			cmd, parseErr := parseJSONInput(input)
+			if parseErr != nil {
+				parseErrors <- parseErr
+				continue
+			}
+			commands <- cmd
 		}
-		printJSON(sess.exec(ctx, cmd))
+	}()
+
+	for {
+		select {
+		case parseErr := <-parseErrors:
+			printJSON(result{Error: parseErr})
+		case cmd, ok := <-commands:
+			if !ok {
+				return
+			}
+			printJSON(sess.exec(ctx, cmd))
+		}
 	}
 }
 
@@ -66,7 +106,10 @@ func parseJSON(data []byte) (command, error) {
 	if err := json.Unmarshal(data, &input); err != nil {
 		return command{}, fmt.Errorf("invalid JSON input: %w", err)
 	}
+	return parseJSONInput(input)
+}
 
+func parseJSONInput(input jsonInput) (command, error) {
 	switch {
 	case input.Eval != "":
 		return command{Type: "eval", Source: input.Eval}, nil

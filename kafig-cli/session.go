@@ -26,8 +26,9 @@ type result struct {
 
 // session holds the kafig runtime and instance, providing a single exec method for all commands.
 type session struct {
-	rt   *kafig.Runtime
-	inst *kafig.Instance
+	rt          *kafig.Runtime
+	inst        *kafig.Instance
+	rpcFallback kafig.RPCFallbackCallback
 }
 
 func newSession(ctx context.Context) (*session, error) {
@@ -58,6 +59,9 @@ func (s *session) reset(ctx context.Context) error {
 		s.inst.Close(context.Background())
 	}
 	router := kafig.NewRPCRouter()
+	if s.rpcFallback != nil {
+		router.WithFallback(s.rpcFallback)
+	}
 	var err error
 	s.inst, err = s.rt.Instance(ctx,
 		kafig.WithRouter(router),
