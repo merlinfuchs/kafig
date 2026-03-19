@@ -30,14 +30,19 @@ type Instance struct {
 	fnDispatchEvent       api.Function // dispatch_event(name_ptr, name_len, params_ptr, params_len, is_async)
 	fnResolveRpc          api.Function
 	fnRejectRpc           api.Function
-	fnGetOpcodeCount api.Function
+	fnGetOpcodeCount      api.Function
 	fnGetCPUTimeUs        api.Function
 	fnResetExecutionStats api.Function
+	fnSetMemoryLimit api.Function // set_memory_limit(limit)
 
 	// interruptCallback is called from the WASM interrupt handler every ~10,000
 	// branch/loop opcodes with the current opcode count and CPU time in
 	// microseconds. Return true to interrupt execution.
 	interruptCallback func(instructions uint64, cpuTimeUs uint64) bool
+
+	// promiseRejectionHandler is called whenever an unhandled promise rejection
+	// occurs. Returns true to interrupt execution.
+	promiseRejectionHandler func(*JsError) bool
 
 	// interrupted is set by Interrupt() and checked by hostShouldInterrupt.
 	interrupted bool
@@ -46,8 +51,8 @@ type Instance struct {
 	// They are drained after the WASM export returns (no re-entrant calls).
 	pendingRPCs []rpcCall
 
-	// scriptError is set by hostSetResult when is_error=1 (from Rust send_error).
-	scriptError *ScriptError
+	// scriptError is set by hostSetResult when is_error=1 (from Rust send_js_error/send_runtime_error).
+	scriptError error
 	hasError    bool
 
 	// resultValue is set by hostSetResult when is_error=0 (from the JS completion value).
@@ -56,13 +61,18 @@ type Instance struct {
 }
 
 func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes []byte, opts instanceOptions) (*Instance, error) {
-	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(cache))
+	cfg := wazero.NewRuntimeConfig().WithCompilationCache(cache)
+	if opts.wasmMemoryLimitPages > 0 {
+		cfg = cfg.WithMemoryLimitPages(opts.wasmMemoryLimitPages)
+	}
+	r := wazero.NewRuntimeWithConfig(ctx, cfg)
 
 	inst := &Instance{
-		runtime:           r,
-		router:            opts.router,
-		logger:            opts.logger,
-		interruptCallback: opts.interruptCallback,
+		runtime:                 r,
+		router:                  opts.router,
+		logger:                  opts.logger,
+		interruptCallback:       opts.interruptCallback,
+		promiseRejectionHandler: opts.promiseRejectionHandler,
 	}
 
 	// The WASM module was compiled with WASI support.
@@ -74,6 +84,7 @@ func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes [
 		NewFunctionBuilder().WithFunc(inst.hostSetResult).Export("host_set_result").
 		NewFunctionBuilder().WithFunc(inst.hostRPCSync).Export("host_rpc_sync").
 		NewFunctionBuilder().WithFunc(inst.hostShouldInterrupt).Export("host_should_interrupt").
+		NewFunctionBuilder().WithFunc(inst.hostPromiseRejection).Export("host_promise_rejection").
 		Instantiate(ctx); err != nil {
 		return nil, fmt.Errorf("kafig: register host module: %w", err)
 	}
@@ -101,6 +112,15 @@ func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes [
 	inst.fnGetOpcodeCount = module.ExportedFunction("get_opcode_count")
 	inst.fnGetCPUTimeUs = module.ExportedFunction("get_cpu_time_us")
 	inst.fnResetExecutionStats = module.ExportedFunction("reset_execution_stats")
+	inst.fnSetMemoryLimit = module.ExportedFunction("set_memory_limit")
+
+	// Apply QuickJS memory limit if configured (before any JS evaluation).
+	if opts.jsMemoryLimit > 0 {
+		if _, err := inst.fnSetMemoryLimit.Call(ctx, uint64(opts.jsMemoryLimit)); err != nil {
+			r.Close(ctx)
+			return nil, fmt.Errorf("kafig: set_memory_limit: %w", err)
+		}
+	}
 
 	// Evaluate the prelude bytecode if configured.
 	if len(opts.preludeBytecode) > 0 {
@@ -140,9 +160,9 @@ func (inst *Instance) evalPrelude(ctx context.Context, bytecode []byte) error {
 	inst.wasmDealloc(ctx, ptr, len(bytecode))
 
 	if inst.hasError {
-		scriptErr := inst.scriptError
+		err := inst.scriptError
 		inst.resetState()
-		return fmt.Errorf("kafig: prelude error: %s", scriptErr.Message)
+		return fmt.Errorf("kafig: prelude error: %s", err.Error())
 	}
 	return nil
 }
@@ -549,24 +569,13 @@ func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload 
 }
 
 // hostSetResult is the host_set_result import. It handles both error reporting
-// (is_error=1, from Rust send_error / promise_reject_cb) and result reporting
-// (is_error=0, from Rust send_result_value / promise_resolve_cb).
+// (is_error=1, from Rust send_js_error / send_runtime_error / promise_reject_cb)
+// and result reporting (is_error=0, from Rust send_result_value / promise_resolve_cb).
 func (inst *Instance) hostSetResult(_ context.Context, resultPtr, resultLen, isError uint32) {
 	resultJSON := inst.wasmReadCopy(resultPtr, resultLen)
 
 	if isError != 0 {
-		var scriptErr ScriptError
-		if err := json.Unmarshal(resultJSON, &scriptErr); err != nil {
-			scriptErr = ScriptError{
-				Message:   string(resultJSON),
-				ErrorType: ErrorTypeRuntimeError,
-			}
-		}
-		// Re-classify on the Go side as a safety net.
-		if goType := classifyError(scriptErr.Message); scriptErr.ErrorType == "" || (scriptErr.ErrorType == ErrorTypeRuntimeError && goType != ErrorTypeRuntimeError) {
-			scriptErr.ErrorType = goType
-		}
-		inst.scriptError = &scriptErr
+		inst.scriptError = parseErrorJSON(resultJSON)
 		inst.hasError = true
 	} else {
 		inst.resultValue = json.RawMessage(resultJSON)
@@ -665,6 +674,25 @@ func (inst *Instance) hostShouldInterrupt(_ context.Context, instructions, cpuTi
 		return 1
 	}
 	if inst.interruptCallback != nil && inst.interruptCallback(instructions, cpuTimeUs) {
+		return 1
+	}
+	return 0
+}
+
+// hostPromiseRejection is called from the WASM promise rejection tracker
+// whenever an unhandled promise rejection occurs. It forwards the error to the
+// user-provided handler and returns 1 to interrupt execution or 0 to continue.
+func (inst *Instance) hostPromiseRejection(_ context.Context, errorJsonPtr, errorJsonLen uint32) int32 {
+	if inst.promiseRejectionHandler == nil {
+		return 0
+	}
+	errorJSON := inst.wasmReadCopy(errorJsonPtr, errorJsonLen)
+	jsErr, ok := parseErrorJSON(errorJSON).(*JsError)
+	if !ok {
+		inst.logError("hostPromiseRejection: unexpected error type", "raw", string(errorJSON))
+		return 0
+	}
+	if inst.promiseRejectionHandler(jsErr) {
 		return 1
 	}
 	return 0

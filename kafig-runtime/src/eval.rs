@@ -2,7 +2,7 @@ use rquickjs::qjs;
 use std::ffi::CString;
 use std::time::Instant;
 
-use crate::error::{extract_exception_message, send_error};
+use crate::error::{extract_exception, send_exception, send_runtime_error};
 use crate::init::RUNTIME;
 use crate::result::process_eval_result;
 use crate::tracking::{discard_stale_state, sample_elapsed_us, EXEC_START};
@@ -30,7 +30,7 @@ pub extern "C" fn eval(ptr: *const u8, len: usize, is_async: i32) {
             let src = match CString::new(source) {
                 Ok(s) => s,
                 Err(_) => {
-                    send_error("eval: source contains null byte");
+                    send_runtime_error("runtime_error", "eval: source contains null byte");
                     return Ok(());
                 }
             };
@@ -50,7 +50,8 @@ pub extern "C" fn eval(ptr: *const u8, len: usize, is_async: i32) {
                 );
 
                 if qjs::JS_IsException(val) {
-                    send_error(&extract_exception_message(&ctx));
+                    let (msg, name, stack) = extract_exception(&ctx);
+                    send_exception(&name, &msg, stack.as_deref());
                 } else {
                     process_eval_result(ctx_ptr, val, is_async != 0);
                 }
@@ -61,7 +62,7 @@ pub extern "C" fn eval(ptr: *const u8, len: usize, is_async: i32) {
             }
             Ok(())
         })
-        .unwrap_or_else(|e| send_error(&format!("eval context error: {e}")));
+        .unwrap_or_else(|e| send_runtime_error("runtime_error", &format!("eval context error: {e}")));
     unsafe {
         sample_elapsed_us();
         EXEC_START = None;
@@ -90,7 +91,7 @@ pub extern "C" fn compile(ptr: *const u8, len: usize, is_async: i32) -> u64 {
         let src = match CString::new(source) {
             Ok(s) => s,
             Err(_) => {
-                send_error("compile: source contains null byte");
+                send_runtime_error("runtime_error", "compile: source contains null byte");
                 return 0u64;
             }
         };
@@ -111,8 +112,8 @@ pub extern "C" fn compile(ptr: *const u8, len: usize, is_async: i32) -> u64 {
             );
 
             if qjs::JS_IsException(val) {
-                let msg = extract_exception_message(&ctx);
-                send_error(&format!("compile: {msg}"));
+                let (msg, _name, _stack) = extract_exception(&ctx);
+                send_runtime_error("runtime_error", &format!("compile: {msg}"));
                 return 0u64;
             }
 
@@ -127,7 +128,7 @@ pub extern "C" fn compile(ptr: *const u8, len: usize, is_async: i32) -> u64 {
             qjs::JS_FreeValue(ctx_ptr, val);
 
             if out_ptr.is_null() {
-                send_error("compile: JS_WriteObject failed");
+                send_runtime_error("runtime_error", "compile: JS_WriteObject failed");
                 return 0u64;
             }
 
@@ -137,7 +138,7 @@ pub extern "C" fn compile(ptr: *const u8, len: usize, is_async: i32) -> u64 {
             let wasm_ptr = crate::alloc::alloc(bytecode_len);
             if wasm_ptr.is_null() {
                 qjs::js_free(ctx_ptr, out_ptr as *mut _);
-                send_error("compile: alloc failed for bytecode");
+                send_runtime_error("runtime_error", "compile: alloc failed for bytecode");
                 return 0u64;
             }
             std::ptr::copy_nonoverlapping(out_ptr, wasm_ptr, bytecode_len);
@@ -169,17 +170,16 @@ pub extern "C" fn eval_compiled(ptr: *const u8, len: usize, is_async: i32) {
                 let obj =
                     qjs::JS_ReadObject(ctx_ptr, ptr, len as u32, qjs::JS_READ_OBJ_BYTECODE as i32);
                 if qjs::JS_IsException(obj) {
-                    send_error(&format!(
-                        "eval_compiled: {}",
-                        extract_exception_message(&ctx)
-                    ));
+                    let (msg, _name, _stack) = extract_exception(&ctx);
+                    send_runtime_error("runtime_error", &format!("eval_compiled: {msg}"));
                     return Ok(());
                 }
 
                 // Execute the compiled function (consumes obj)
                 let result = qjs::JS_EvalFunction(ctx_ptr, obj);
                 if qjs::JS_IsException(result) {
-                    send_error(&extract_exception_message(&ctx));
+                    let (msg, name, stack) = extract_exception(&ctx);
+                    send_exception(&name, &msg, stack.as_deref());
                     return Ok(());
                 }
 
@@ -192,7 +192,7 @@ pub extern "C" fn eval_compiled(ptr: *const u8, len: usize, is_async: i32) {
             }
             Ok(())
         })
-        .unwrap_or_else(|e| send_error(&format!("eval_compiled error: {e}")));
+        .unwrap_or_else(|e| send_runtime_error("runtime_error", &format!("eval_compiled error: {e}")));
     unsafe {
         sample_elapsed_us();
         EXEC_START = None;

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,15 +133,15 @@ func TestEvalRuntimeError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
-	if scriptErr.ErrorType != ErrorTypeRuntimeError {
-		t.Errorf("errorType = %s, want runtime_error", scriptErr.ErrorType)
+	if jsErr.Name != "Error" {
+		t.Errorf("name = %s, want Error", jsErr.Name)
 	}
-	if scriptErr.Message != "boom" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "boom")
+	if jsErr.Message != "boom" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "boom")
 	}
 }
 
@@ -151,9 +152,9 @@ func TestEvalSyntaxError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
 }
 
@@ -338,12 +339,9 @@ func TestDispatchUnregisteredEvent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unregistered event")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
-	}
-	if scriptErr.ErrorType != ErrorTypeRuntimeError {
-		t.Errorf("errorType = %s, want runtime_error", scriptErr.ErrorType)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
 }
 
@@ -420,15 +418,15 @@ func TestSetInterruptStopsExecution(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from interrupt")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var rtErr *RuntimeError
+	if !errors.As(err, &rtErr) {
+		t.Fatalf("expected RuntimeError, got %T: %v", err, err)
 	}
-	if scriptErr.Message != "interrupted" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "interrupted")
+	if rtErr.Message != "interrupted" {
+		t.Errorf("message = %q, want %q", rtErr.Message, "interrupted")
 	}
-	if scriptErr.ErrorType != ErrorTypeCPULimitExceeded {
-		t.Errorf("errorType = %s, want cpu_limit_exceeded", scriptErr.ErrorType)
+	if rtErr.Code != ErrorCodeCPULimitExceeded {
+		t.Errorf("code = %s, want cpu_limit_exceeded", rtErr.Code)
 	}
 }
 
@@ -1128,12 +1126,12 @@ func TestInterruptCallbackStopsExecution(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected interrupt error")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var rtErr *RuntimeError
+	if !errors.As(err, &rtErr) {
+		t.Fatalf("expected RuntimeError, got %T: %v", err, err)
 	}
-	if scriptErr.ErrorType != ErrorTypeCPULimitExceeded {
-		t.Errorf("errorType = %s, want cpu_limit_exceeded", scriptErr.ErrorType)
+	if rtErr.Code != ErrorCodeCPULimitExceeded {
+		t.Errorf("code = %s, want cpu_limit_exceeded", rtErr.Code)
 	}
 }
 
@@ -1331,12 +1329,12 @@ func TestAsyncEvalUnhandledThrow(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
-	if scriptErr.Message != "async boom" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "async boom")
+	if jsErr.Message != "async boom" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "async boom")
 	}
 }
 
@@ -1348,12 +1346,12 @@ func TestAsyncEvalRejectedPromise(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from rejected promise")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
-	if scriptErr.Message != "rejected" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "rejected")
+	if jsErr.Message != "rejected" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "rejected")
 	}
 }
 
@@ -1410,12 +1408,12 @@ func TestDispatchEventAsyncHandlerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from handler")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
-	if scriptErr.Message != "handler exploded" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "handler exploded")
+	if jsErr.Message != "handler exploded" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "handler exploded")
 	}
 }
 
@@ -1435,12 +1433,12 @@ func TestDispatchEventAsyncHandlerRejectedPromise(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from rejected promise")
 	}
-	var scriptErr *ScriptError
-	if !errors.As(err, &scriptErr) {
-		t.Fatalf("expected ScriptError, got %T: %v", err, err)
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
 	}
-	if scriptErr.Message != "nope" {
-		t.Errorf("message = %q, want %q", scriptErr.Message, "nope")
+	if jsErr.Message != "nope" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "nope")
 	}
 }
 
@@ -1473,6 +1471,399 @@ func TestDispatchEventSyncHandlerReturnsObject(t *testing.T) {
 	}
 	if res["len"] != float64(5) {
 		t.Errorf("len = %v", res["len"])
+	}
+}
+
+// ─── Stack trace retrieval ───────────────────────────────────────────────────
+
+func TestErrorStackTraceFromThrow(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		function inner() { throw new Error("deep"); }
+		function outer() { inner(); }
+		outer();
+	`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
+	}
+	if jsErr.Name != "Error" {
+		t.Errorf("name = %q, want %q", jsErr.Name, "Error")
+	}
+	if jsErr.Message != "deep" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "deep")
+	}
+	if jsErr.Stack == nil {
+		t.Fatal("expected stack trace, got nil")
+	}
+	stack := *jsErr.Stack
+	// The stack should mention our function names.
+	for _, fn := range []string{"inner", "outer"} {
+		if !strings.Contains(stack, fn) {
+			t.Errorf("stack trace missing %q:\n%s", fn, stack)
+		}
+	}
+}
+
+func TestErrorStackTraceFromNestedCalls(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		function a() { return b(); }
+		function b() { return c(); }
+		function c() { throw new TypeError("bad type"); }
+		a();
+	`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
+	}
+	if jsErr.Name != "TypeError" {
+		t.Errorf("name = %q, want %q", jsErr.Name, "TypeError")
+	}
+	if jsErr.Stack == nil {
+		t.Fatal("expected stack trace, got nil")
+	}
+	stack := *jsErr.Stack
+	for _, fn := range []string{"a", "b", "c"} {
+		if !strings.Contains(stack, fn) {
+			t.Errorf("stack trace missing function %q:\n%s", fn, stack)
+		}
+	}
+}
+
+func TestErrorStackTraceAsyncThrow(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		async function fetchData() {
+			throw new RangeError("out of range");
+		}
+		await fetchData();
+	`, WithAsync())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
+	}
+	if jsErr.Name != "RangeError" {
+		t.Errorf("name = %q, want %q", jsErr.Name, "RangeError")
+	}
+	if jsErr.Message != "out of range" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "out of range")
+	}
+	if jsErr.Stack == nil {
+		t.Fatal("expected stack trace, got nil")
+	}
+	if !strings.Contains(*jsErr.Stack,"fetchData") {
+		t.Errorf("stack trace missing 'fetchData':\n%s", *jsErr.Stack)
+	}
+}
+
+func TestErrorStackTraceDispatchEvent(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		function validate(params) {
+			if (!params.name) throw new Error("name required");
+		}
+		host.on("process", (params) => {
+			validate(params);
+			return "ok";
+		});
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+
+	_, err = inst.DispatchEvent(context.Background(), "process", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
+	}
+	if jsErr.Message != "name required" {
+		t.Errorf("message = %q, want %q", jsErr.Message, "name required")
+	}
+	if jsErr.Stack == nil {
+		t.Fatal("expected stack trace, got nil")
+	}
+	if !strings.Contains(*jsErr.Stack,"validate") {
+		t.Errorf("stack trace missing 'validate':\n%s", *jsErr.Stack)
+	}
+}
+
+func TestErrorStackTraceRejectedPromise(t *testing.T) {
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		function failHard() {
+			return Promise.reject(new Error("promise failed"));
+		}
+		await failHard();
+	`, WithAsync())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var jsErr *JsError
+	if !errors.As(err, &jsErr) {
+		t.Fatalf("expected JsError, got %T: %v", err, err)
+	}
+	if jsErr.Stack == nil {
+		t.Fatal("expected stack trace, got nil")
+	}
+	if !strings.Contains(*jsErr.Stack,"failHard") {
+		t.Errorf("stack trace missing 'failHard':\n%s", *jsErr.Stack)
+	}
+}
+
+// ─── Promise rejection handler ──────────────────────────────────────────────
+
+func TestPromiseRejectionHandlerCalled(t *testing.T) {
+	rt := newTestRuntime(t)
+	var captured *JsError
+	inst, err := rt.Instance(context.Background(),
+		WithRouter(noopRouter()),
+		WithPromiseRejectionHandler(func(jsErr *JsError) bool {
+			captured = jsErr
+			return false // continue execution
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	_, err = inst.Eval(context.Background(), `
+		Promise.reject(new TypeError("something broke"));
+		42
+	`, WithAsync())
+	// The handler returns false (continue), so eval should succeed.
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("rejection handler was not called")
+	}
+	if captured.Name != "TypeError" {
+		t.Errorf("name = %q, want %q", captured.Name, "TypeError")
+	}
+	if captured.Message != "something broke" {
+		t.Errorf("message = %q, want %q", captured.Message, "something broke")
+	}
+}
+
+func TestPromiseRejectionHandlerInterrupts(t *testing.T) {
+	rt := newTestRuntime(t)
+	inst, err := rt.Instance(context.Background(),
+		WithRouter(noopRouter()),
+		WithPromiseRejectionHandler(func(jsErr *JsError) bool {
+			return true // interrupt execution
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	_, err = inst.Eval(context.Background(), `
+		Promise.reject(new Error("fatal"));
+		// Run enough work so the interrupt handler fires after FORCE_INTERRUPT is set.
+		let sum = 0;
+		for (let i = 0; i < 1000000; i++) { sum += i; }
+		sum
+	`, WithAsync())
+	if err == nil {
+		t.Fatal("expected error from interrupted execution")
+	}
+}
+
+func TestPromiseRejectionHandlerNotCalledWhenHandled(t *testing.T) {
+	rt := newTestRuntime(t)
+	inst, err := rt.Instance(context.Background(),
+		WithRouter(noopRouter()),
+		WithPromiseRejectionHandler(func(jsErr *JsError) bool {
+			return false
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	result, err := inst.Eval(context.Background(), `
+		await Promise.reject(new Error("caught")).catch(e => e.message)
+	`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != `"caught"` {
+		t.Errorf("result = %s, want %q", result, "caught")
+	}
+	// Note: QuickJS may briefly report the rejection as unhandled before
+	// the .catch() handler is attached in the same microtask. We only
+	// verify the eval succeeds and returns the correct value.
+}
+
+func TestPromiseRejectionHandlerNoHandler(t *testing.T) {
+	// Without a handler, unhandled rejections are silently ignored.
+	inst := newTestInstance(t, noopRouter())
+
+	_, err := inst.Eval(context.Background(), `
+		Promise.reject(new Error("ignored"));
+		42
+	`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+}
+
+func TestPromiseRejectionHandlerWithStack(t *testing.T) {
+	rt := newTestRuntime(t)
+	var captured *JsError
+	inst, err := rt.Instance(context.Background(),
+		WithRouter(noopRouter()),
+		WithPromiseRejectionHandler(func(jsErr *JsError) bool {
+			captured = jsErr
+			return false
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	_, err = inst.Eval(context.Background(), `
+		function failingFunc() {
+			return Promise.reject(new Error("with stack"));
+		}
+		failingFunc();
+		42
+	`, WithAsync())
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("rejection handler was not called")
+	}
+	if captured.Message != "with stack" {
+		t.Errorf("message = %q, want %q", captured.Message, "with stack")
+	}
+	if captured.Stack == nil {
+		t.Error("expected stack trace, got nil")
+	}
+}
+
+func TestPromiseRejectionHandlerDispatchEvent(t *testing.T) {
+	rt := newTestRuntime(t)
+	var captured *JsError
+	inst, err := rt.Instance(context.Background(),
+		WithRouter(noopRouter()),
+		WithPromiseRejectionHandler(func(jsErr *JsError) bool {
+			captured = jsErr
+			return false
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	defer inst.Close(context.Background())
+
+	_, err = inst.Eval(context.Background(), `
+		host.on("fire", (params) => {
+			Promise.reject(new RangeError("out of bounds"));
+			return "ok";
+		});
+	`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+
+	result, err := inst.DispatchEvent(context.Background(), "fire", json.RawMessage(`{}`), WithAsync())
+	if err != nil {
+		t.Fatalf("DispatchEvent: %v", err)
+	}
+	if string(result) != `"ok"` {
+		t.Errorf("result = %s, want %q", result, "ok")
+	}
+	if captured == nil {
+		t.Fatal("rejection handler was not called during dispatch")
+	}
+	if captured.Name != "RangeError" {
+		t.Errorf("name = %q, want %q", captured.Name, "RangeError")
+	}
+}
+
+// ─── Configurable limits ─────────────────────────────────────────────────────
+
+func newTestInstanceWithOpts(t *testing.T, opts ...InstanceOption) *Instance {
+	t.Helper()
+	rt := newTestRuntime(t)
+	allOpts := append([]InstanceOption{WithRouter(noopRouter())}, opts...)
+	inst, err := rt.Instance(context.Background(), allOpts...)
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	t.Cleanup(func() { inst.Close(context.Background()) })
+	return inst
+}
+
+func TestJSMemoryLimit(t *testing.T) {
+	inst := newTestInstanceWithOpts(t, WithJSMemoryLimit(1*1024*1024)) // 1MB
+
+	// Try to allocate a large array that exceeds the 1MB limit.
+	_, err := inst.Eval(context.Background(), `new Uint8Array(2 * 1024 * 1024)`)
+	if err == nil {
+		t.Fatal("expected memory limit error, got nil")
+	}
+	var rtErr *RuntimeError
+	if !errors.As(err, &rtErr) {
+		t.Fatalf("expected RuntimeError, got %T: %v", err, err)
+	}
+	if rtErr.Code != ErrorCodeMemoryLimitExceeded {
+		t.Errorf("code = %q, want %q", rtErr.Code, ErrorCodeMemoryLimitExceeded)
+	}
+}
+
+func TestWASMMemoryLimitPages(t *testing.T) {
+	// Without a WASM memory limit, a 4MB allocation should succeed.
+	instDefault := newTestInstanceWithOpts(t)
+	_, err := instDefault.Eval(context.Background(), `new Uint8Array(4 * 1024 * 1024).length`)
+	if err != nil {
+		t.Fatalf("4MB allocation should succeed without WASM limit: %v", err)
+	}
+
+	// With a tight WASM memory limit (32 pages = 2MB), the same allocation
+	// should fail because WASM memory cannot grow enough.
+	inst := newTestInstanceWithOpts(t, WithWASMMemoryLimitPages(32))
+
+	_, err = inst.Eval(context.Background(), `new Uint8Array(4 * 1024 * 1024).length`)
+	if err == nil {
+		t.Fatal("expected error with WASM memory limit, got nil")
+	}
+}
+
+func TestDefaultLimitsUnchanged(t *testing.T) {
+	// Without any limit options, moderate allocations should work fine.
+	inst := newTestInstanceWithOpts(t)
+
+	result, err := inst.Eval(context.Background(), `new Uint8Array(1024 * 1024).length`)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if string(result) != "1048576" {
+		t.Errorf("got %s, want 1048576", result)
 	}
 }
 

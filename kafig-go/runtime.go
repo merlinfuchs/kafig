@@ -135,6 +135,7 @@ func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bo
 		NewFunctionBuilder().WithFunc(func(_ context.Context, _, _, _ uint32) {}).Export("host_set_result").
 		NewFunctionBuilder().WithFunc(func(_ context.Context, _, _, _, _ uint32) uint64 { return 0 }).Export("host_rpc_sync").
 		NewFunctionBuilder().WithFunc(func(_ context.Context, _, _ uint64) int32 { return 0 }).Export("host_should_interrupt").
+		NewFunctionBuilder().WithFunc(func(_ context.Context, _, _ uint32) int32 { return 0 }).Export("host_promise_rejection").
 		Instantiate(ctx); err != nil {
 		return nil, fmt.Errorf("register host module: %w", err)
 	}

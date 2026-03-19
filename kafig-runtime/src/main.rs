@@ -26,6 +26,10 @@ unsafe extern "C" {
         params_len: usize,
     ) -> u64;
     pub(crate) fn host_should_interrupt(instructions: u64, cpu_time_us: u64) -> i32;
+    pub(crate) fn host_promise_rejection(
+        error_json_ptr: *const u8,
+        error_json_len: usize,
+    ) -> i32;
 }
 
 fn main() {

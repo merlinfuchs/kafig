@@ -112,12 +112,15 @@ func printInteractive(r result) {
 	}
 
 	if r.Error != nil {
-		var scriptErr *kafig.ScriptError
-		if errors.As(r.Error, &scriptErr) {
-			fmt.Println(styleError.Render(fmt.Sprintf("%s: %s", scriptErr.ErrorType, scriptErr.Message)))
-			if scriptErr.Stack != nil && *scriptErr.Stack != "" {
-				fmt.Println(styleStack.Render(*scriptErr.Stack))
+		var jsErr *kafig.JsError
+		var rtErr *kafig.RuntimeError
+		if errors.As(r.Error, &jsErr) {
+			fmt.Println(styleError.Render(fmt.Sprintf("%s: %s", jsErr.Name, jsErr.Message)))
+			if jsErr.Stack != nil && *jsErr.Stack != "" {
+				fmt.Println(styleStack.Render(*jsErr.Stack))
 			}
+		} else if errors.As(r.Error, &rtErr) {
+			fmt.Println(styleError.Render(fmt.Sprintf("%s: %s", rtErr.Code, rtErr.Message)))
 		} else {
 			fmt.Println(styleError.Render(r.Error.Error()))
 		}

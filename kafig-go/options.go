@@ -22,7 +22,8 @@ type RuntimeOption func(*runtimeOptions)
 // WithModule sets a custom WASM binary to use instead of the embedded default.
 // The binary must export the same functions as the kafig-runtime module (alloc,
 // dealloc, eval, eval_compiled, dispatch_event, etc.) and import the "env"
-// host functions (host_rpc, host_set_result, host_rpc_sync, host_should_interrupt).
+// host functions (host_rpc, host_set_result, host_rpc_sync, host_should_interrupt,
+// host_promise_rejection).
 func WithModule(data []byte) RuntimeOption {
 	return func(o *runtimeOptions) { o.module = data }
 }
@@ -56,11 +57,14 @@ func WithCompilationCache(cache wazero.CompilationCache) RuntimeOption {
 
 // instanceOptions holds configuration for a single Instance.
 type instanceOptions struct {
-	router             *RPCRouter
-	logger             *slog.Logger
-	closeOnContextDone bool
-	preludeBytecode    []byte
-	interruptCallback  func(opcodes uint64, cpuTimeUs uint64) bool
+	router                  *RPCRouter
+	logger                  *slog.Logger
+	closeOnContextDone      bool
+	preludeBytecode         []byte
+	interruptCallback       func(opcodes uint64, cpuTimeUs uint64) bool
+	promiseRejectionHandler func(*JsError) bool
+	jsMemoryLimit        uint32 // 0 = use default (32MB)
+	wasmMemoryLimitPages uint32 // 0 = unlimited (1 page = 64KB)
 }
 
 // InstanceOption configures a Instance created with Instance.
@@ -79,6 +83,27 @@ func WithRouter(router *RPCRouter) InstanceOption {
 // true to interrupt execution.
 func WithInterruptCallback(fn func(opcodes uint64, cpuTimeUs uint64) bool) InstanceOption {
 	return func(o *instanceOptions) { o.interruptCallback = fn }
+}
+
+// WithPromiseRejectionHandler sets a callback invoked whenever an unhandled
+// promise rejection occurs. The callback receives the JsError describing the
+// rejection and returns true to interrupt execution or false to continue.
+func WithPromiseRejectionHandler(fn func(*JsError) bool) InstanceOption {
+	return func(o *instanceOptions) { o.promiseRejectionHandler = fn }
+}
+
+// WithJSMemoryLimit sets the QuickJS heap memory limit in bytes.
+// Default: 32MB (set in the WASM runtime). Set to 0 to use the default.
+func WithJSMemoryLimit(bytes uint32) InstanceOption {
+	return func(o *instanceOptions) { o.jsMemoryLimit = bytes }
+}
+
+// WithWASMMemoryLimitPages sets the maximum WASM linear memory in pages
+// (1 page = 64KB). This limits the total memory available to the WASM
+// module including the QuickJS heap, stack, and Rust allocator overhead.
+// Default: 0 (unlimited).
+func WithWASMMemoryLimitPages(pages uint32) InstanceOption {
+	return func(o *instanceOptions) { o.wasmMemoryLimitPages = pages }
 }
 
 // evalOptions holds per-call configuration for Eval, EvalCompiled, and
