@@ -4,7 +4,6 @@ use std::time::Instant;
 use crate::init::RUNTIME;
 
 pub(crate) const JS_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
-pub(crate) const JS_STACK_LIMIT: usize = 512 * 1024;
 
 pub(crate) static mut OPCODE_COUNT: u64 = 0;
 pub(crate) static mut EXEC_START: Option<Instant> = None;
@@ -12,6 +11,7 @@ pub(crate) static mut CPU_ELAPSED_US: u64 = 0;
 pub(crate) static mut DRAINING: bool = false;
 pub(crate) static mut INITIALIZED: bool = false;
 pub(crate) static mut USED_RPC_CALLS: bool = false;
+pub(crate) static mut FORCE_INTERRUPT: bool = false;
 
 // Call host_should_interrupt on every QuickJS interrupt handler invocation.
 // QuickJS fires the handler every ~10,000 branch/loop opcodes
@@ -63,6 +63,7 @@ pub extern "C" fn reset_execution_stats() {
 
 pub(crate) fn discard_stale_state() {
     unsafe {
+        FORCE_INTERRUPT = false;
         INITIALIZED = true;
         if !USED_RPC_CALLS {
             return; // Fast path: nothing to clean up

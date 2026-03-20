@@ -1,6 +1,8 @@
-use rquickjs::{Context, Function, Runtime};
+use rquickjs::{Context, Function, Runtime, Value};
+use rquickjs::convert::Coerced;
 use std::sync::OnceLock;
 
+use crate::error::build_js_error_json;
 use crate::tracking::*;
 
 const PRELUDE_SCRIPT: &str = include_str!("prelude.js");
@@ -25,10 +27,9 @@ pub(crate) static RUNTIME: OnceLock<JsRuntime> = OnceLock::new();
 pub extern "C" fn wizer_initialize() {
     let rt = Runtime::new().unwrap();
     rt.set_memory_limit(JS_MEMORY_LIMIT);
-    rt.set_max_stack_size(JS_STACK_LIMIT);
     rt.set_interrupt_handler(Some(Box::new(|| unsafe {
-        if DRAINING {
-            return true; // Immediately interrupt stale jobs during cleanup
+        if DRAINING || FORCE_INTERRUPT {
+            return true; // Immediately interrupt stale jobs or forced by rejection handler
         }
         OPCODE_COUNT += 10_000;
         if !INITIALIZED || OPCODE_COUNT < NEXT_CHECK {
@@ -38,6 +39,41 @@ pub extern "C" fn wizer_initialize() {
         let elapsed = sample_elapsed_us();
         crate::host_should_interrupt(OPCODE_COUNT, elapsed) != 0
     })));
+
+    rt.set_host_promise_rejection_tracker(Some(Box::new(
+        |_ctx: rquickjs::Ctx<'_>, _promise: Value<'_>, reason: Value<'_>, is_handled: bool| {
+            if is_handled {
+                return;
+            }
+            let (msg, name, stack) = if let Some(exc) = reason.as_exception() {
+                let msg = exc
+                    .message()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let name = exc
+                    .as_object()
+                    .get::<_, Option<Coerced<String>>>("name")
+                    .ok()
+                    .flatten()
+                    .map(|c| c.0)
+                    .unwrap_or_else(|| "Error".to_string());
+                let stack = exc.stack();
+                (msg, name, stack)
+            } else {
+                let msg = reason
+                    .as_string()
+                    .and_then(|s| s.to_string().ok())
+                    .unwrap_or_else(|| "unknown error".to_string());
+                (msg, "Error".to_string(), None)
+            };
+            let json = build_js_error_json(&name, &msg, stack.as_deref());
+            let should_interrupt = unsafe {
+                crate::host_promise_rejection(json.as_ptr(), json.len())
+            } != 0;
+            if should_interrupt {
+                unsafe { FORCE_INTERRUPT = true; }
+            }
+        },
+    )));
 
     let ctx = Context::full(&rt).unwrap();
     ctx.with(|ctx| {
@@ -126,3 +162,10 @@ pub extern "C" fn wizer_initialize() {
 
     RUNTIME.set(JsRuntime { _rt: rt, ctx }).unwrap();
 }
+
+#[unsafe(export_name = "set_memory_limit")]
+pub extern "C" fn set_memory_limit(limit: u32) {
+    let js = RUNTIME.get().expect("wizer_initialize was not called");
+    js._rt.set_memory_limit(limit as usize);
+}
+

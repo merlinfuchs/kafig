@@ -1,7 +1,7 @@
 use rquickjs::qjs;
 use std::ffi::c_int;
 
-use crate::error::{classify_error, json_escape_string};
+use crate::error::{classify_error_code, send_js_error, send_runtime_error};
 
 /// JSON-stringify a JSValue and send it to the host via host_set_result.
 /// For undefined/non-serializable values (functions, symbols), sends "null".
@@ -93,8 +93,8 @@ unsafe extern "C" fn promise_resolve_cb(
     }
 }
 
-/// Static C-ABI callback for Promise .catch() — extract the error message
-/// and stack, format an error JSON, and send it via host_set_result.
+/// Static C-ABI callback for Promise .catch() — extract the error name,
+/// message, and stack, then send via the appropriate error function.
 unsafe extern "C" fn promise_reject_cb(
     ctx: *mut qjs::JSContext,
     _this: qjs::JSValue,
@@ -124,26 +124,16 @@ unsafe extern "C" fn promise_reject_cb(
             "unknown error".to_owned()
         };
 
+        let name = extract_js_string_prop(ctx, val, c"name", "Error");
         let stack = extract_js_string_prop(ctx, val, c"stack", "");
-        let error_type = classify_error(&msg);
 
-        let json = if stack.is_empty() {
-            format!(
-                r#"{{"error":{},"errorType":"{}","stack":null}}"#,
-                json_escape_string(&msg),
-                error_type
-            )
+        let code = classify_error_code(&msg);
+        if code != "runtime_error" {
+            send_runtime_error(code, &msg);
         } else {
-            format!(
-                r#"{{"error":{},"errorType":"{}","stack":{}}}"#,
-                json_escape_string(&msg),
-                error_type,
-                json_escape_string(&stack)
-            )
-        };
-
-        let b = json.as_bytes();
-        crate::host_set_result(b.as_ptr(), b.len(), 1);
+            let stack_opt = if stack.is_empty() { None } else { Some(stack.as_str()) };
+            send_js_error(&name, &msg, stack_opt);
+        }
 
         qjs::JS_UNDEFINED
     }

@@ -1,7 +1,7 @@
 use rquickjs::Function;
 use std::time::Instant;
 
-use crate::error::send_error;
+use crate::error::send_runtime_error;
 use crate::init::RUNTIME;
 use crate::tracking::{sample_elapsed_us, EXEC_START};
 
@@ -37,7 +37,7 @@ fn call_js_rpc_settlement(fn_name: &str, id: i32, ptr: *const u8, len: usize) {
             while ctx.execute_pending_job() {}
             Ok(())
         })
-        .unwrap_or_else(|e| send_error(&format!("{fn_name} error: {e}")));
+        .unwrap_or_else(|e| send_runtime_error("runtime_error", &format!("{fn_name} error: {e}")));
 
     unsafe {
         sample_elapsed_us();

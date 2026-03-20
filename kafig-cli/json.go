@@ -32,7 +32,8 @@ type jsonOutput struct {
 
 type jsonError struct {
 	Message   string `json:"message"`
-	ErrorType string `json:"errorType,omitempty"`
+	Name      string `json:"name,omitempty"`
+	ErrorCode string `json:"errorCode,omitempty"`
 	Stack     string `json:"stack,omitempty"`
 }
 
@@ -134,14 +135,20 @@ func printJSON(r result) {
 	}
 
 	if r.Error != nil {
-		var scriptErr *kafig.ScriptError
-		if errors.As(r.Error, &scriptErr) {
+		var jsErr *kafig.JsError
+		var rtErr *kafig.RuntimeError
+		if errors.As(r.Error, &jsErr) {
 			out.Error = &jsonError{
-				Message:   scriptErr.Message,
-				ErrorType: string(scriptErr.ErrorType),
+				Message: jsErr.Message,
+				Name:    jsErr.Name,
 			}
-			if scriptErr.Stack != nil {
-				out.Error.Stack = *scriptErr.Stack
+			if jsErr.Stack != nil {
+				out.Error.Stack = *jsErr.Stack
+			}
+		} else if errors.As(r.Error, &rtErr) {
+			out.Error = &jsonError{
+				Message:   rtErr.Message,
+				ErrorCode: string(rtErr.Code),
 			}
 		} else {
 			out.Error = &jsonError{Message: r.Error.Error()}

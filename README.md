@@ -20,7 +20,7 @@ Go application
 
 **Key properties:**
 
-- Each Instance has its own WASM linear memory and QuickJS heap (32 MB limit, 512 KB stack)
+- Each Instance has its own WASM linear memory and QuickJS heap (configurable limits)
 - CPU time is tracked per-execution and excludes time spent waiting for RPC results
 - JS can call Go functions via async (`host.rpc`) or sync (`host.rpcSync`) RPC
 - Go can call into JS via named event handlers registered with `host.on`
@@ -60,6 +60,12 @@ inst, err := rt.Instance(ctx,
     kafig.WithInterruptCallback(func(opcodes, cpuTimeUs uint64) bool {
         return cpuTimeUs > 5_000_000 // 5 second CPU limit
     }),
+    kafig.WithPromiseRejectionHandler(func(err *kafig.JsError) bool {
+        log.Printf("unhandled rejection: %s", err)
+        return false // return true to interrupt execution
+    }),
+    kafig.WithJSMemoryLimit(16 * 1024 * 1024),  // 16 MB QuickJS heap
+    kafig.WithWASMMemoryLimitPages(512),          // 32 MB WASM linear memory
 )
 defer inst.Close(ctx)
 ```
@@ -113,6 +119,69 @@ stats, _ := inst.GetExecutionStats(ctx)
 fmt.Printf("opcodes: %d, cpu: %d us\n", stats.Opcodes, stats.CPUTimeUs)
 inst.ResetExecutionStats(ctx)
 ```
+
+### Error Handling
+
+Eval, EvalCompiled, and DispatchEvent return two distinct error types:
+
+- **`*kafig.JsError`** — a JavaScript exception was thrown. Contains `Name` (e.g. `"TypeError"`), `Message`, and an optional `Stack` trace.
+- **`*kafig.RuntimeError`** — a resource limit or internal error. Contains a `Code` (`cpu_limit_exceeded`, `memory_limit_exceeded`, `stack_overflow`, `runtime_error`) and a `Message`.
+
+```go
+result, err := inst.Eval(ctx, `null.foo`, kafig.WithAsync())
+if err != nil {
+    switch e := err.(type) {
+    case *kafig.JsError:
+        fmt.Printf("JS %s: %s\n", e.Name, e.Message) // JS TypeError: cannot read property 'foo' of null
+        if e.Stack != nil {
+            fmt.Println(*e.Stack)
+        }
+    case *kafig.RuntimeError:
+        fmt.Printf("%s: %s\n", e.Code, e.Message) // cpu_limit_exceeded: interrupted
+    }
+}
+```
+
+### Unhandled Promise Rejections
+
+By default, unhandled promise rejections are silently ignored. Use `WithPromiseRejectionHandler` to receive them:
+
+```go
+inst, err := rt.Instance(ctx,
+    kafig.WithRouter(router),
+    kafig.WithPromiseRejectionHandler(func(err *kafig.JsError) bool {
+        log.Printf("unhandled rejection: %s: %s", err.Name, err.Message)
+        return false // continue execution
+    }),
+)
+```
+
+The handler is called immediately when the rejection occurs. Return `true` to interrupt execution (the current eval will return a `RuntimeError` with code `cpu_limit_exceeded`), or `false` to let execution continue.
+
+### Resource Limits
+
+Each instance can be configured with memory and CPU limits:
+
+```go
+inst, err := rt.Instance(ctx,
+    kafig.WithRouter(router),
+
+    // QuickJS heap memory limit (default: 32 MB).
+    // Controls how much memory JS objects, strings, and arrays can use.
+    kafig.WithJSMemoryLimit(8 * 1024 * 1024), // 8 MB
+
+    // WASM linear memory limit in pages (1 page = 64 KB, default: unlimited).
+    // Caps total memory including QuickJS heap, Rust allocator, and stack.
+    kafig.WithWASMMemoryLimitPages(256), // 16 MB
+
+    // CPU time limit via interrupt callback.
+    kafig.WithInterruptCallback(func(opcodes, cpuTimeUs uint64) bool {
+        return cpuTimeUs > 1_000_000 // 1 second
+    }),
+)
+```
+
+`WithJSMemoryLimit` controls the QuickJS heap — allocations beyond this limit cause a JS out-of-memory error. `WithWASMMemoryLimitPages` caps the total WASM linear memory, which includes the QuickJS heap, Rust runtime overhead, and the WASM stack. Set both for defense in depth: the JS limit gives clean error messages, while the WASM limit is a hard ceiling enforced by the WASM runtime.
 
 ## JavaScript API
 

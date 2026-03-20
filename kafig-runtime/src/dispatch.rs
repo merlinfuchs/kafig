@@ -2,7 +2,7 @@ use rquickjs::qjs;
 use rquickjs::{Error, Function, Value};
 use std::time::Instant;
 
-use crate::error::{extract_exception_message, send_error};
+use crate::error::{extract_exception, send_exception, send_runtime_error};
 use crate::init::RUNTIME;
 use crate::result::process_eval_result;
 use crate::tracking::{discard_stale_state, sample_elapsed_us, EXEC_START};
@@ -46,10 +46,11 @@ pub extern "C" fn dispatch_event(
                     unsafe { process_eval_result(ctx_ptr, raw, is_async != 0) };
                 }
                 Err(Error::Exception) => {
-                    send_error(&extract_exception_message(&ctx));
+                    let (msg, ename, stack) = extract_exception(&ctx);
+                    send_exception(&ename, &msg, stack.as_deref());
                 }
                 Err(e) => {
-                    send_error(&format!("dispatch_event error: {e}"));
+                    send_runtime_error("runtime_error", &format!("dispatch_event error: {e}"));
                 }
             }
 
@@ -58,7 +59,7 @@ pub extern "C" fn dispatch_event(
             }
             Ok(())
         })
-        .unwrap_or_else(|e| send_error(&format!("dispatch_event error: {e}")));
+        .unwrap_or_else(|e| send_runtime_error("runtime_error", &format!("dispatch_event error: {e}")));
     unsafe {
         sample_elapsed_us();
         EXEC_START = None;
