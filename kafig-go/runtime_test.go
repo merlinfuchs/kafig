@@ -1846,7 +1846,15 @@ func TestWASMMemoryLimitPages(t *testing.T) {
 
 	// With a tight WASM memory limit (32 pages = 2MB), the same allocation
 	// should fail because WASM memory cannot grow enough.
-	inst := newTestInstanceWithOpts(t, WithWASMMemoryLimitPages(32))
+	rt, err := New(context.Background(), WithCompilationCache(testCache), WithWASMMemoryLimitPages(32))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	inst, err := rt.Instance(context.Background(), WithRouter(noopRouter()))
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	t.Cleanup(func() { inst.Close(context.Background()) })
 
 	_, err = inst.Eval(context.Background(), `new Uint8Array(4 * 1024 * 1024).length`)
 	if err == nil {

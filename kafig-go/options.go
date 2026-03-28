@@ -8,12 +8,13 @@ import (
 
 // runtimeOptions holds configuration for a Runtime and its Instances.
 type runtimeOptions struct {
-	module             []byte // custom WASM binary; nil = use embedded default
-	prelude            string
-	preludeBytecode    []byte // compiled by New(), used by each Instance
-	logger             *slog.Logger
-	closeOnContextDone bool
-	compilationCache   wazero.CompilationCache
+	module               []byte // custom WASM binary; nil = use embedded default
+	prelude              string
+	preludeBytecode      []byte // compiled by New(), used by each Instance
+	logger               *slog.Logger
+	closeOnContextDone   bool
+	compilationCache     wazero.CompilationCache
+	wasmMemoryLimitPages uint32 // 0 = unlimited (1 page = 64KB)
 }
 
 // RuntimeOption configures a Runtime created with New.
@@ -55,16 +56,22 @@ func WithCompilationCache(cache wazero.CompilationCache) RuntimeOption {
 	return func(o *runtimeOptions) { o.compilationCache = cache }
 }
 
+// WithWASMMemoryLimitPages sets the maximum WASM linear memory in pages
+// (1 page = 64KB). This limits the total memory available to each WASM
+// module instance including the QuickJS heap, stack, and Rust allocator
+// overhead. Default: 0 (unlimited).
+func WithWASMMemoryLimitPages(pages uint32) RuntimeOption {
+	return func(o *runtimeOptions) { o.wasmMemoryLimitPages = pages }
+}
+
 // instanceOptions holds configuration for a single Instance.
 type instanceOptions struct {
 	router                  *RPCRouter
 	logger                  *slog.Logger
-	closeOnContextDone      bool
 	preludeBytecode         []byte
 	interruptCallback       func(opcodes uint64, cpuTimeUs uint64) bool
 	promiseRejectionHandler func(*JsError) bool
-	jsMemoryLimit        uint32 // 0 = use default (32MB)
-	wasmMemoryLimitPages uint32 // 0 = unlimited (1 page = 64KB)
+	jsMemoryLimit           uint32 // 0 = use default (32MB)
 }
 
 // InstanceOption configures a Instance created with Instance.
@@ -96,14 +103,6 @@ func WithPromiseRejectionHandler(fn func(*JsError) bool) InstanceOption {
 // Default: 32MB (set in the WASM runtime). Set to 0 to use the default.
 func WithJSMemoryLimit(bytes uint32) InstanceOption {
 	return func(o *instanceOptions) { o.jsMemoryLimit = bytes }
-}
-
-// WithWASMMemoryLimitPages sets the maximum WASM linear memory in pages
-// (1 page = 64KB). This limits the total memory available to the WASM
-// module including the QuickJS heap, stack, and Rust allocator overhead.
-// Default: 0 (unlimited).
-func WithWASMMemoryLimitPages(pages uint32) InstanceOption {
-	return func(o *instanceOptions) { o.wasmMemoryLimitPages = pages }
 }
 
 // evalOptions holds per-call configuration for Eval, EvalCompiled, and
