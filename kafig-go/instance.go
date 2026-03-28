@@ -511,8 +511,16 @@ func sharedHostPromiseRejection(ctx context.Context, errorJsonPtr, errorJsonLen 
 // hostRPC is the host_rpc import. It copies the method and params from WASM
 // memory and queues an rpcCall for later processing.
 func (inst *Instance) hostRPC(_ context.Context, methodPtr, methodLen, paramsPtr, paramsLen, promiseID uint32) {
-	method := inst.wasmReadString(methodPtr, methodLen)
-	params := inst.wasmReadCopy(paramsPtr, paramsLen)
+	method, err := inst.wasmReadString(methodPtr, methodLen)
+	if err != nil {
+		inst.logError("hostRPC: read method failed", "error", err)
+		return
+	}
+	params, err := inst.wasmReadCopy(paramsPtr, paramsLen)
+	if err != nil {
+		inst.logError("hostRPC: read params failed", "error", err)
+		return
+	}
 
 	inst.logDebug("rpc call queued", "method", method, "promise_id", promiseID)
 
@@ -531,8 +539,16 @@ func (inst *Instance) hostRPC(_ context.Context, methodPtr, methodLen, paramsPtr
 // At ptr: [tag_byte][json_bytes...] where tag 0=success, 1=error.
 // Returns 0 on handler-not-found or allocation failure.
 func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, paramsPtr, paramsLen uint32) uint64 {
-	method := inst.wasmReadString(methodPtr, methodLen)
-	params := json.RawMessage(inst.wasmReadCopy(paramsPtr, paramsLen))
+	method, err := inst.wasmReadString(methodPtr, methodLen)
+	if err != nil {
+		inst.logError("hostRPCSync: read method failed", "error", err)
+		return 0
+	}
+	params, err := inst.wasmReadCopy(paramsPtr, paramsLen)
+	if err != nil {
+		inst.logError("hostRPCSync: read params failed", "error", err)
+		return 0
+	}
 
 	inst.logDebug("sync rpc call", "method", method)
 
@@ -593,7 +609,13 @@ func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload 
 // (is_error=1, from Rust send_js_error / send_runtime_error / promise_reject_cb)
 // and result reporting (is_error=0, from Rust send_result_value / promise_resolve_cb).
 func (inst *Instance) hostSetResult(_ context.Context, resultPtr, resultLen, isError uint32) {
-	resultJSON := inst.wasmReadCopy(resultPtr, resultLen)
+	resultJSON, err := inst.wasmReadCopy(resultPtr, resultLen)
+	if err != nil {
+		inst.logError("hostSetResult: read failed", "error", err)
+		inst.scriptError = &RuntimeError{Code: ErrorCodeRuntimeError, Message: err.Error()}
+		inst.hasError = true
+		return
+	}
 
 	if isError != 0 {
 		inst.scriptError = parseErrorJSON(resultJSON)
@@ -667,24 +689,24 @@ func (inst *Instance) wasmWrite(ptr uint32, data []byte) {
 // wasmReadCopy reads bytes from WASM memory and returns a Go-owned copy.
 // The copy is necessary because WASM memory pointers are only valid during
 // the host function call.
-func (inst *Instance) wasmReadCopy(ptr, length uint32) []byte {
+func (inst *Instance) wasmReadCopy(ptr, length uint32) ([]byte, error) {
 	data, ok := inst.module.Memory().Read(ptr, length)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("OOB read at ptr=%d len=%d", ptr, length)
 	}
 	out := make([]byte, len(data))
 	copy(out, data)
-	return out
+	return out, nil
 }
 
 // wasmReadString reads bytes from WASM memory directly into a Go string,
 // avoiding the intermediate []byte allocation that wasmReadCopy would need.
-func (inst *Instance) wasmReadString(ptr, length uint32) string {
+func (inst *Instance) wasmReadString(ptr, length uint32) (string, error) {
 	data, ok := inst.module.Memory().Read(ptr, length)
 	if !ok {
-		return ""
+		return "", fmt.Errorf("OOB read at ptr=%d len=%d", ptr, length)
 	}
-	return string(data)
+	return string(data), nil
 }
 
 // ─── Execution stats & interrupt handler ─────────────────────────────────────
@@ -736,7 +758,11 @@ func (inst *Instance) hostPromiseRejection(_ context.Context, errorJsonPtr, erro
 	if inst.promiseRejectionHandler == nil {
 		return 0
 	}
-	errorJSON := inst.wasmReadCopy(errorJsonPtr, errorJsonLen)
+	errorJSON, err := inst.wasmReadCopy(errorJsonPtr, errorJsonLen)
+	if err != nil {
+		inst.logError("hostPromiseRejection: read failed", "error", err)
+		return 0
+	}
 	jsErr, ok := parseErrorJSON(errorJSON).(*JsError)
 	if !ok {
 		inst.logError("hostPromiseRejection: unexpected error type", "raw", string(errorJSON))
