@@ -32,6 +32,8 @@ github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260317095852-c68510921659 h1:NF/s
 github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260317095852-c68510921659/go.mod h1:QcKoz+HV/xJXf6TgpiWFJPFNohmDKxkDDlkyDHBnSgE=
 github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260320000651-11ab3c5f14c5 h1:O9bzUUsLVGRTlURpUn67omvPP3XzSktsHm2MQIdEojY=
 github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260320000651-11ab3c5f14c5/go.mod h1:QcKoz+HV/xJXf6TgpiWFJPFNohmDKxkDDlkyDHBnSgE=
+github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260328124252-63344695e8e3 h1:OxaoM5/DJ2BNTuZDNP6QkMonC5NGQTqW7ehLBhq8Yc4=
+github.com/merlinfuchs/kafig/kafig-go v0.0.0-20260328124252-63344695e8e3/go.mod h1:QcKoz+HV/xJXf6TgpiWFJPFNohmDKxkDDlkyDHBnSgE=
 github.com/muesli/termenv v0.16.0 h1:S5AlUN9dENB57rsbnkPyfdGuWIlkmzJjbFf0Tf5FWUc=
 github.com/muesli/termenv v0.16.0/go.mod h1:ZRfOIKPFDYQoDFF4Olj7/QJbW60Ol/kL1pU3VfY/Cnk=
 github.com/pkg/term v1.2.0-beta.2 h1:L3y/h2jkuBVFdWiJvNfYfKmzcCnILw7mJWm2JQuMppw=
