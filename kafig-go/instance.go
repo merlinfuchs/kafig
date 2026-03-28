@@ -5,11 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
+
+// instanceContextKey is used to pass the active *Instance through
+// context.Context so that shared host functions can dispatch to
+// the correct instance.
+type instanceContextKey struct{}
+
+func instanceFromContext(ctx context.Context) *Instance {
+	inst, ok := ctx.Value(instanceContextKey{}).(*Instance)
+	if !ok {
+		panic("kafig: no Instance in context — host function called without instance context")
+	}
+	return inst
+}
 
 // Instance is an isolated WASM+QuickJS execution environment. Each Instance has
 // its own linear memory, JS heap, and pending RPC state.
@@ -17,10 +30,9 @@ import (
 // All methods must be called from a single goroutine — the WASM module is
 // single-threaded and Instance does not synchronize access internally.
 type Instance struct {
-	runtime wazero.Runtime
-	module  api.Module
-	router  *RPCRouter
-	logger  *slog.Logger
+	module api.Module
+	router *RPCRouter
+	logger *slog.Logger
 
 	// WASM export function handles, cached on creation for performance.
 	fnAlloc               api.Function
@@ -33,7 +45,7 @@ type Instance struct {
 	fnGetOpcodeCount      api.Function
 	fnGetCPUTimeUs        api.Function
 	fnResetExecutionStats api.Function
-	fnSetMemoryLimit api.Function // set_memory_limit(limit)
+	fnSetMemoryLimit      api.Function // set_memory_limit(limit)
 
 	// interruptCallback is called from the WASM interrupt handler every ~10,000
 	// branch/loop opcodes with the current opcode count and CPU time in
@@ -44,8 +56,9 @@ type Instance struct {
 	// occurs. Returns true to interrupt execution.
 	promiseRejectionHandler func(*JsError) bool
 
-	// interrupted is set by Interrupt() and checked by hostShouldInterrupt.
-	interrupted bool
+	// interrupted is set by Interrupt() (possibly from another goroutine)
+	// and checked by hostShouldInterrupt.
+	interrupted atomic.Bool
 
 	// pendingRPCs collects host_rpc calls made during a single WASM invocation.
 	// They are drained after the WASM export returns (no re-entrant calls).
@@ -60,42 +73,20 @@ type Instance struct {
 	hasResult   bool
 }
 
-func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes []byte, opts instanceOptions) (*Instance, error) {
-	cfg := wazero.NewRuntimeConfig().WithCompilationCache(cache)
-	if opts.wasmMemoryLimitPages > 0 {
-		cfg = cfg.WithMemoryLimitPages(opts.wasmMemoryLimitPages)
-	}
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
-
+func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.CompiledModule, opts instanceOptions) (*Instance, error) {
 	inst := &Instance{
-		runtime:                 r,
 		router:                  opts.router,
 		logger:                  opts.logger,
 		interruptCallback:       opts.interruptCallback,
 		promiseRejectionHandler: opts.promiseRejectionHandler,
 	}
 
-	// The WASM module was compiled with WASI support.
-	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+	instCtx := context.WithValue(ctx, instanceContextKey{}, inst)
 
-	// Register host imports under the "env" module.
-	if _, err := r.NewHostModuleBuilder("env").
-		NewFunctionBuilder().WithFunc(inst.hostRPC).Export("host_rpc").
-		NewFunctionBuilder().WithFunc(inst.hostSetResult).Export("host_set_result").
-		NewFunctionBuilder().WithFunc(inst.hostRPCSync).Export("host_rpc_sync").
-		NewFunctionBuilder().WithFunc(inst.hostShouldInterrupt).Export("host_should_interrupt").
-		NewFunctionBuilder().WithFunc(inst.hostPromiseRejection).Export("host_promise_rejection").
-		Instantiate(ctx); err != nil {
-		return nil, fmt.Errorf("kafig: register host module: %w", err)
-	}
-
-	// Compile (hits the cache) and instantiate.
-	compiled, err := r.CompileModule(ctx, wasmBytes)
-	if err != nil {
-		return nil, fmt.Errorf("kafig: compile module: %w", err)
-	}
-
-	module, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithSysNanotime())
+	// Instantiate an anonymous guest module (empty name allows multiple
+	// instances in the same runtime).
+	module, err := wzRuntime.InstantiateModule(instCtx, compiled,
+		wazero.NewModuleConfig().WithName("").WithSysNanotime())
 	if err != nil {
 		return nil, fmt.Errorf("kafig: instantiate module: %w", err)
 	}
@@ -116,32 +107,27 @@ func newInstance(ctx context.Context, cache wazero.CompilationCache, wasmBytes [
 
 	// Apply QuickJS memory limit if configured (before any JS evaluation).
 	if opts.jsMemoryLimit > 0 {
-		if _, err := inst.fnSetMemoryLimit.Call(ctx, uint64(opts.jsMemoryLimit)); err != nil {
-			r.Close(ctx)
+		if _, err := inst.fnSetMemoryLimit.Call(instCtx, uint64(opts.jsMemoryLimit)); err != nil {
+			module.Close(ctx)
 			return nil, fmt.Errorf("kafig: set_memory_limit: %w", err)
 		}
 	}
 
 	// Evaluate the prelude bytecode if configured.
 	if len(opts.preludeBytecode) > 0 {
-		if err := inst.evalPrelude(ctx, opts.preludeBytecode); err != nil {
-			r.Close(ctx)
+		if err := inst.evalPrelude(instCtx, opts.preludeBytecode); err != nil {
+			module.Close(ctx)
 			return nil, err
 		}
 		inst.logDebug("prelude evaluated")
 	}
 
-	// If configured, watch the context and auto-close on cancellation.
-	if opts.closeOnContextDone {
-		go func() {
-			<-ctx.Done()
-			inst.Interrupt()
-			inst.Close(context.Background())
-		}()
-	}
-
 	inst.logDebug("instance created")
 	return inst, nil
+}
+
+func (inst *Instance) withInstanceCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, instanceContextKey{}, inst)
 }
 
 // evalPrelude evaluates compiled bytecode synchronously (no async wrapper).
@@ -167,9 +153,10 @@ func (inst *Instance) evalPrelude(ctx context.Context, bytecode []byte) error {
 	return nil
 }
 
-// Close releases the WASM instance and its associated resources.
+// Close releases the WASM module and its associated resources. Other
+// instances sharing the same Runtime are unaffected.
 func (inst *Instance) Close(ctx context.Context) error {
-	return inst.runtime.Close(ctx)
+	return inst.module.Close(ctx)
 }
 
 // Eval evaluates a JavaScript source string globally. The result of the last
@@ -183,7 +170,8 @@ func (inst *Instance) Eval(ctx context.Context, source string, options ...EvalOp
 		o(&opts)
 	}
 
-	inst.interrupted = false
+	ctx = inst.withInstanceCtx(ctx)
+	inst.interrupted.Store(false)
 	inst.resetState()
 
 	sourceBytes := []byte(source)
@@ -229,7 +217,8 @@ func (inst *Instance) EvalCompiled(ctx context.Context, bytecode []byte, options
 		o(&opts)
 	}
 
-	inst.interrupted = false
+	ctx = inst.withInstanceCtx(ctx)
+	inst.interrupted.Store(false)
 	inst.resetState()
 
 	ptr, err := inst.wasmAlloc(ctx, len(bytecode))
@@ -274,7 +263,8 @@ func (inst *Instance) DispatchEvent(ctx context.Context, name string, paramsJSON
 		o(&opts)
 	}
 
-	inst.interrupted = false
+	ctx = inst.withInstanceCtx(ctx)
+	inst.interrupted.Store(false)
 	inst.resetState()
 
 	nameBytes := []byte(name)
@@ -327,7 +317,7 @@ func (inst *Instance) DispatchEvent(ctx context.Context, name string, paramsJSON
 // takes effect within ~8192 opcodes when the next host_should_interrupt
 // callback fires.
 func (inst *Instance) Interrupt() {
-	inst.interrupted = true
+	inst.interrupted.Store(true)
 }
 
 // ─── RPC service loop ────────────────────────────────────────────────────────
@@ -487,9 +477,33 @@ func (inst *Instance) rejectRPC(ctx context.Context, promiseID uint32, rpcErr er
 	return nil
 }
 
-// ─── Host import callbacks ───────────────────────────────────────────────────
-// These are called synchronously from within WASM. They must NOT call back
-// into WASM — they only record state for the service loop to process later.
+// ─── Shared host import callbacks ───────────────────────────────────────────
+// These are registered once on the shared wazero.Runtime and dispatch to the
+// active *Instance via context. They are called synchronously from within WASM
+// and must NOT call back into WASM.
+
+func sharedHostRPC(ctx context.Context, methodPtr, methodLen, paramsPtr, paramsLen, promiseID uint32) {
+	instanceFromContext(ctx).hostRPC(ctx, methodPtr, methodLen, paramsPtr, paramsLen, promiseID)
+}
+
+func sharedHostSetResult(ctx context.Context, resultPtr, resultLen, isError uint32) {
+	instanceFromContext(ctx).hostSetResult(ctx, resultPtr, resultLen, isError)
+}
+
+func sharedHostRPCSync(ctx context.Context, methodPtr, methodLen, paramsPtr, paramsLen uint32) uint64 {
+	return instanceFromContext(ctx).hostRPCSync(ctx, methodPtr, methodLen, paramsPtr, paramsLen)
+}
+
+func sharedHostShouldInterrupt(ctx context.Context, instructions, cpuTimeUs uint64) int32 {
+	return instanceFromContext(ctx).hostShouldInterrupt(ctx, instructions, cpuTimeUs)
+}
+
+func sharedHostPromiseRejection(ctx context.Context, errorJsonPtr, errorJsonLen uint32) int32 {
+	return instanceFromContext(ctx).hostPromiseRejection(ctx, errorJsonPtr, errorJsonLen)
+}
+
+// ─── Instance host import callbacks ─────────────────────────────────────────
+// These are the actual implementations, called via the shared wrappers above.
 
 // hostRPC is the host_rpc import. It copies the method and params from WASM
 // memory and queues an rpcCall for later processing.
@@ -650,6 +664,7 @@ type ExecutionStats struct {
 // GetExecutionStats returns the opcode count and CPU time accumulated
 // since the last ResetExecutionStats call (or instance creation).
 func (inst *Instance) GetExecutionStats(ctx context.Context) (ExecutionStats, error) {
+	ctx = inst.withInstanceCtx(ctx)
 	instrRes, err := inst.fnGetOpcodeCount.Call(ctx)
 	if err != nil {
 		return ExecutionStats{}, fmt.Errorf("kafig: get_opcode_count: %w", err)
@@ -663,6 +678,7 @@ func (inst *Instance) GetExecutionStats(ctx context.Context) (ExecutionStats, er
 
 // ResetExecutionStats zeros the instruction counter and CPU timer.
 func (inst *Instance) ResetExecutionStats(ctx context.Context) error {
+	ctx = inst.withInstanceCtx(ctx)
 	_, err := inst.fnResetExecutionStats.Call(ctx)
 	return err
 }
@@ -670,7 +686,7 @@ func (inst *Instance) ResetExecutionStats(ctx context.Context) error {
 // hostShouldInterrupt is called from the WASM interrupt handler every ~8192
 // opcodes. It checks the interrupted flag and the user-provided callback.
 func (inst *Instance) hostShouldInterrupt(_ context.Context, instructions, cpuTimeUs uint64) int32 {
-	if inst.interrupted {
+	if inst.interrupted.Load() {
 		return 1
 	}
 	if inst.interruptCallback != nil && inst.interruptCallback(instructions, cpuTimeUs) {

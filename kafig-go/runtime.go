@@ -10,19 +10,22 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-// Runtime holds a compilation cache so that the WASM module is parsed and
-// compiled once, then reused across all Instances. Each Instance gets its own
-// wazero.Runtime (required for per-instance host function bindings) but the
-// expensive compilation step is shared via the cache.
+// Runtime holds a shared wazero.Runtime so that WASI, host imports, and the
+// compiled WASM module are created once and reused across all Instances. Each
+// Instance gets its own anonymous module instantiation with isolated linear
+// memory and JS heap.
 type Runtime struct {
-	module   []byte // WASM binary (custom or embedded default)
-	cache    wazero.CompilationCache
-	ownCache bool // true if we created the cache and should close it
-	opts     runtimeOptions
+	wazeroRuntime wazero.Runtime
+	compiled      wazero.CompiledModule
+	module        []byte // WASM binary (for compileBytecode's temporary runtime)
+	cache         wazero.CompilationCache
+	ownCache      bool // true if we created the cache and should close it
+	opts          runtimeOptions
 }
 
-// New pre-compiles the embedded WASM module. The returned Runtime can create
-// any number of Instances via [Runtime.Instance].
+// New pre-compiles the embedded WASM module and creates a shared wazero
+// runtime with WASI and host imports. The returned Runtime can create any
+// number of Instances via [Runtime.Instance].
 //
 // If WithPrelude is set, the prelude source is compiled to QuickJS bytecode
 // at this point. Each Instance then evaluates the bytecode (skipping parsing).
@@ -47,26 +50,56 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 		cache = wazero.NewCompilationCache()
 	}
 
-	// Compile once into the cache by creating a temporary runtime.
-	r := wazero.NewRuntimeWithConfig(
-		ctx,
-		wazero.NewRuntimeConfig().
-			WithCloseOnContextDone(opts.closeOnContextDone).
-			WithCompilationCache(cache),
-	)
-	if _, err := r.CompileModule(ctx, module); err != nil {
+	// Build the shared wazero runtime configuration.
+	cfg := wazero.NewRuntimeConfig().
+		WithCompilationCache(cache).
+		WithCloseOnContextDone(opts.closeOnContextDone)
+	if opts.wasmMemoryLimitPages > 0 {
+		cfg = cfg.WithMemoryLimitPages(opts.wasmMemoryLimitPages)
+	}
+
+	r := wazero.NewRuntimeWithConfig(ctx, cfg)
+
+	// Instantiate WASI once — shared across all guest modules.
+	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+
+	// Register "env" host module once with context-dispatched functions.
+	if _, err := r.NewHostModuleBuilder("env").
+		NewFunctionBuilder().WithFunc(sharedHostRPC).Export("host_rpc").
+		NewFunctionBuilder().WithFunc(sharedHostSetResult).Export("host_set_result").
+		NewFunctionBuilder().WithFunc(sharedHostRPCSync).Export("host_rpc_sync").
+		NewFunctionBuilder().WithFunc(sharedHostShouldInterrupt).Export("host_should_interrupt").
+		NewFunctionBuilder().WithFunc(sharedHostPromiseRejection).Export("host_promise_rejection").
+		Instantiate(ctx); err != nil {
+		r.Close(ctx)
+		return nil, fmt.Errorf("kafig: register host module: %w", err)
+	}
+
+	// Compile the guest module once into the cache.
+	compiled, err := r.CompileModule(ctx, module)
+	if err != nil {
+		r.Close(ctx)
 		return nil, fmt.Errorf("kafig: compile module: %w", err)
 	}
-	r.Close(ctx)
 
-	rt := &Runtime{module: module, cache: cache, ownCache: ownCache, opts: opts}
+	rt := &Runtime{
+		wazeroRuntime: r,
+		compiled:      compiled,
+		module:        module,
+		cache:         cache,
+		ownCache:      ownCache,
+		opts:          opts,
+	}
 
 	// If a prelude is configured, compile it to bytecode now so each
 	// Instance can skip parsing.
 	if opts.prelude != "" {
 		bytecode, err := rt.compileBytecode(ctx, opts.prelude, false)
 		if err != nil {
-			cache.Close(ctx)
+			r.Close(ctx)
+			if ownCache {
+				cache.Close(ctx)
+			}
 			return nil, fmt.Errorf("kafig: compile prelude: %w", err)
 		}
 		rt.opts.preludeBytecode = bytecode
@@ -76,12 +109,12 @@ func New(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 }
 
 // Instance creates a new isolated WASM instance. Each instance has its own
-// wazero runtime, linear memory, QuickJS heap, and host function bindings.
+// linear memory, QuickJS heap, and host function bindings, but shares the
+// compiled module and host infrastructure with other instances.
 func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Instance, error) {
 	opts := instanceOptions{
-		logger:             r.opts.logger,
-		closeOnContextDone: r.opts.closeOnContextDone,
-		preludeBytecode:    r.opts.preludeBytecode,
+		logger:          r.opts.logger,
+		preludeBytecode: r.opts.preludeBytecode,
 	}
 	for _, o := range options {
 		o(&opts)
@@ -91,7 +124,7 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 		return nil, fmt.Errorf("kafig: RPCRouter is required (use WithRouter)")
 	}
 
-	return newInstance(ctx, r.cache, r.module, opts)
+	return newInstance(ctx, r.wazeroRuntime, r.compiled, opts)
 }
 
 // Compile compiles JavaScript source to QuickJS bytecode. The bytecode can be
@@ -109,13 +142,16 @@ func (r *Runtime) Compile(ctx context.Context, source string, options ...EvalOpt
 	return r.compileBytecode(ctx, source, opts.async_)
 }
 
-// Close releases the compilation cache if it was created by this Runtime.
-// If a custom cache was provided via WithCompilationCache, it is not closed.
+// Close releases the shared wazero runtime (closing all remaining instances)
+// and the compilation cache if it was created by this Runtime.
 func (r *Runtime) Close(ctx context.Context) error {
+	err := r.wazeroRuntime.Close(ctx)
 	if r.ownCache {
-		return r.cache.Close(ctx)
+		if cerr := r.cache.Close(ctx); cerr != nil && err == nil {
+			err = cerr
+		}
 	}
-	return nil
+	return err
 }
 
 // compileBytecode creates a temporary WASM instance, compiles the given source

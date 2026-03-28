@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -264,6 +265,137 @@ func BenchmarkDispatchEvent(b *testing.B) {
 		if string(result) != `"hello world"` {
 			b.Fatalf("unexpected result: %s", result)
 		}
+	}
+}
+
+// ─── Memory ─────────────────────────────────────────────────────────────────
+
+// heapAlloc returns current Go heap allocation after forcing GC.
+func heapAlloc() uint64 {
+	runtime.GC()
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
+
+func BenchmarkMemoryRuntime(b *testing.B) {
+	ctx := context.Background()
+
+	var goBytes uint64
+	for i := 0; i < b.N; i++ {
+		before := heapAlloc()
+		rt, err := New(ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		after := heapAlloc()
+		goBytes = after - before
+		rt.Close(ctx)
+	}
+	b.ReportMetric(float64(goBytes), "go-bytes")
+	b.ReportMetric(float64(goBytes)/(1024*1024), "go-MB")
+}
+
+func BenchmarkMemoryInstance(b *testing.B) {
+	ctx := context.Background()
+	rt, err := New(ctx, WithCompilationCache(testCache))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// heapAlloc includes the WASM linear memory (wazero backs it with a Go
+	// []byte), so go-overhead = heap delta - wasm size.
+	var heapDelta uint64
+	var wasmSize uint32
+	for i := 0; i < b.N; i++ {
+		before := heapAlloc()
+		inst, err := rt.Instance(ctx, WithRouter(noopRouter()))
+		if err != nil {
+			b.Fatal(err)
+		}
+		after := heapAlloc()
+		heapDelta = after - before
+		wasmSize = inst.module.Memory().Size()
+		inst.Close(ctx)
+	}
+	b.ReportMetric(float64(wasmSize), "wasm-bytes")
+	b.ReportMetric(float64(heapDelta-uint64(wasmSize)), "go-bytes")
+	b.ReportMetric(float64(heapDelta)/(1024*1024), "total-MB")
+}
+
+func BenchmarkMemoryInstanceAfterEval(b *testing.B) {
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{"Empty", `undefined`},
+		{"SmallAlloc", `var a = "x".repeat(1024); a.length`},
+		{"LargeAlloc", `var a = "x".repeat(1024*1024); a.length`},
+		{"ManyObjects", `var arr = []; for (var i = 0; i < 10000; i++) arr.push({i:i}); arr.length`},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			ctx := context.Background()
+			rt, err := New(ctx, WithCompilationCache(testCache))
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var heapDelta uint64
+			var wasmSize uint32
+			for i := 0; i < b.N; i++ {
+				before := heapAlloc()
+				inst, err := rt.Instance(ctx, WithRouter(noopRouter()))
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := inst.Eval(ctx, tc.script); err != nil {
+					b.Fatal(err)
+				}
+				after := heapAlloc()
+				heapDelta = after - before
+				wasmSize = inst.module.Memory().Size()
+				inst.Close(ctx)
+			}
+			b.ReportMetric(float64(wasmSize), "wasm-bytes")
+			b.ReportMetric(float64(heapDelta-uint64(wasmSize)), "go-bytes")
+			b.ReportMetric(float64(heapDelta)/(1024*1024), "total-MB")
+		})
+	}
+}
+
+func BenchmarkMemoryMultipleInstances(b *testing.B) {
+	for _, n := range []int{1, 10, 50} {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			ctx := context.Background()
+			rt, err := New(ctx, WithCompilationCache(testCache))
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var heapPerInst float64
+			var wasmPerInst float64
+			for i := 0; i < b.N; i++ {
+				before := heapAlloc()
+				instances := make([]*Instance, n)
+				for j := 0; j < n; j++ {
+					inst, err := rt.Instance(ctx, WithRouter(noopRouter()))
+					if err != nil {
+						b.Fatal(err)
+					}
+					instances[j] = inst
+				}
+				after := heapAlloc()
+				heapPerInst = float64(after-before) / float64(n)
+				wasmPerInst = float64(instances[0].module.Memory().Size())
+				for _, inst := range instances {
+					inst.Close(ctx)
+				}
+			}
+			b.ReportMetric(wasmPerInst, "wasm-bytes/inst")
+			b.ReportMetric(heapPerInst-wasmPerInst, "go-bytes/inst")
+			b.ReportMetric(heapPerInst/(1024*1024), "total-MB/inst")
+		})
 	}
 }
 
