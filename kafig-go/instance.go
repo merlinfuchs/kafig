@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
@@ -92,18 +93,30 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 	}
 	inst.module = module
 
-	// Cache exported function handles.
-	inst.fnAlloc = module.ExportedFunction("alloc")
-	inst.fnDealloc = module.ExportedFunction("dealloc")
-	inst.fnEval = module.ExportedFunction("eval")
-	inst.fnEvalCompiled = module.ExportedFunction("eval_compiled")
-	inst.fnDispatchEvent = module.ExportedFunction("dispatch_event")
-	inst.fnResolveRpc = module.ExportedFunction("resolve_rpc")
-	inst.fnRejectRpc = module.ExportedFunction("reject_rpc")
-	inst.fnGetOpcodeCount = module.ExportedFunction("get_opcode_count")
-	inst.fnGetCPUTimeUs = module.ExportedFunction("get_cpu_time_us")
-	inst.fnResetExecutionStats = module.ExportedFunction("reset_execution_stats")
-	inst.fnSetMemoryLimit = module.ExportedFunction("set_memory_limit")
+	// Cache exported function handles and verify they all exist.
+	for _, exp := range []struct {
+		name   string
+		target *api.Function
+	}{
+		{"alloc", &inst.fnAlloc},
+		{"dealloc", &inst.fnDealloc},
+		{"eval", &inst.fnEval},
+		{"eval_compiled", &inst.fnEvalCompiled},
+		{"dispatch_event", &inst.fnDispatchEvent},
+		{"resolve_rpc", &inst.fnResolveRpc},
+		{"reject_rpc", &inst.fnRejectRpc},
+		{"get_opcode_count", &inst.fnGetOpcodeCount},
+		{"get_cpu_time_us", &inst.fnGetCPUTimeUs},
+		{"reset_execution_stats", &inst.fnResetExecutionStats},
+		{"set_memory_limit", &inst.fnSetMemoryLimit},
+	} {
+		fn := module.ExportedFunction(exp.name)
+		if fn == nil {
+			_ = module.Close(ctx)
+			return nil, fmt.Errorf("kafig: WASM module missing required export %q", exp.name)
+		}
+		*exp.target = fn
+	}
 
 	// Apply QuickJS memory limit if configured (before any JS evaluation).
 	if opts.jsMemoryLimit > 0 {
@@ -398,37 +411,27 @@ func (inst *Instance) launchPendingRPCs(ctx context.Context, results chan<- rpcR
 
 	for _, rpc := range batch {
 		go func(r rpcCall) {
-			defer func() {
-				if p := recover(); p != nil {
-					select {
-					case results <- rpcResult{PromiseID: r.PromiseID, Err: fmt.Errorf("handler panic: %v", p)}:
-					case <-ctx.Done():
-					}
-				}
-			}()
+			var value json.RawMessage
+			var err error
 
 			h, ok := inst.router.asyncHandlers[r.Method]
 			if !ok {
-				// Fallback: sync handlers can be called via the async path too.
 				h, ok = inst.router.syncHandlers[r.Method]
 			}
 			if !ok {
 				if inst.router.fallbackHandler != nil {
-					value, err := inst.router.fallbackHandler(ctx, r.Method, r.Params)
-					select {
-					case results <- rpcResult{PromiseID: r.PromiseID, Value: value, Err: err}:
-					case <-ctx.Done():
-					}
-					return
+					value, err = callWithRecover(func() (json.RawMessage, error) {
+						return inst.router.fallbackHandler(ctx, r.Method, r.Params)
+					})
+				} else {
+					err = fmt.Errorf("method %q not registered", r.Method)
 				}
-				select {
-				case results <- rpcResult{PromiseID: r.PromiseID, Err: fmt.Errorf("method %q not registered", r.Method)}:
-				case <-ctx.Done():
-				}
-				return
+			} else {
+				value, err = callWithRecover(func() (json.RawMessage, error) {
+					return h(ctx, r.Params)
+				})
 			}
 
-			value, err := h(ctx, r.Params)
 			select {
 			case results <- rpcResult{PromiseID: r.PromiseID, Value: value, Err: err}:
 			case <-ctx.Done():
@@ -537,7 +540,9 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 	h, ok := inst.router.syncHandlers[method]
 	if !ok {
 		if inst.router.fallbackHandler != nil {
-			result, err := inst.router.fallbackHandler(ctx, method, params)
+			result, err := callWithRecover(func() (json.RawMessage, error) {
+				return inst.router.fallbackHandler(ctx, method, params)
+			})
 			if err != nil {
 				inst.logDebug("sync rpc fallback error", "method", method, "error", err)
 				return inst.writeSyncRPCResult(ctx, 1, []byte(err.Error()))
@@ -553,7 +558,9 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 	}
 
 	// Call the handler synchronously — no goroutine, no channel.
-	result, err := h(ctx, params)
+	result, err := callWithRecover(func() (json.RawMessage, error) {
+		return h(ctx, params)
+	})
 	if err != nil {
 		inst.logDebug("sync rpc error", "method", method, "error", err)
 		return inst.writeSyncRPCResult(ctx, 1, []byte(err.Error()))
@@ -605,11 +612,35 @@ func (inst *Instance) resetState() {
 	inst.pendingRPCs = inst.pendingRPCs[:0]
 }
 
+// callWithRecover calls fn and converts any panic into an error, preserving
+// the stack trace for debugging.
+func callWithRecover(fn func() (json.RawMessage, error)) (result json.RawMessage, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = &handlerPanic{value: p, stack: debug.Stack()}
+		}
+	}()
+	return fn()
+}
+
+// handlerPanic wraps a recovered panic value with a stack trace. The Error()
+// string is kept short (suitable for RPC error messages); the full stack is
+// available via Stack() for logging.
+type handlerPanic struct {
+	value any
+	stack []byte
+}
+
+func (e *handlerPanic) Error() string { return fmt.Sprintf("handler panic: %v", e.value) }
+func (e *handlerPanic) Stack() []byte { return e.stack }
+
 // ─── WASM memory helpers ─────────────────────────────────────────────────────
 
 func (inst *Instance) wasmAlloc(ctx context.Context, size int) (uint32, error) {
 	if size == 0 {
-		return 0, nil
+		// Allocate 1 byte to avoid passing a null pointer to Rust, where
+		// constructing a slice from (ptr=0, len=0) is undefined behavior.
+		size = 1
 	}
 	res, err := inst.fnAlloc.Call(ctx, uint64(size))
 	if err != nil {
@@ -623,6 +654,9 @@ func (inst *Instance) wasmAlloc(ctx context.Context, size int) (uint32, error) {
 }
 
 func (inst *Instance) wasmDealloc(ctx context.Context, ptr uint32, size int) {
+	if size == 0 {
+		size = 1 // match wasmAlloc's clamp
+	}
 	inst.fnDealloc.Call(ctx, uint64(ptr), uint64(size)) //nolint:errcheck
 }
 

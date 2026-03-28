@@ -189,6 +189,9 @@ func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bo
 	fnCompile := module.ExportedFunction("compile")
 	fnAlloc := module.ExportedFunction("alloc")
 	fnDealloc := module.ExportedFunction("dealloc")
+	if fnCompile == nil || fnAlloc == nil || fnDealloc == nil {
+		return nil, fmt.Errorf("WASM module missing required export (compile, alloc, or dealloc)")
+	}
 
 	// Allocate and write source into WASM memory.
 	sourceBytes := []byte(source)
