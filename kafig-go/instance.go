@@ -17,7 +17,11 @@ import (
 type instanceContextKey struct{}
 
 func instanceFromContext(ctx context.Context) *Instance {
-	return ctx.Value(instanceContextKey{}).(*Instance)
+	inst, ok := ctx.Value(instanceContextKey{}).(*Instance)
+	if !ok {
+		panic("kafig: no Instance in context — host function called without instance context")
+	}
+	return inst
 }
 
 // Instance is an isolated WASM+QuickJS execution environment. Each Instance has
@@ -26,9 +30,10 @@ func instanceFromContext(ctx context.Context) *Instance {
 // All methods must be called from a single goroutine — the WASM module is
 // single-threaded and Instance does not synchronize access internally.
 type Instance struct {
-	module api.Module
-	router *RPCRouter
-	logger *slog.Logger
+	module    api.Module
+	router    *RPCRouter
+	logger    *slog.Logger
+	cancelCtx context.CancelFunc // cancels the closeOnContextDone goroutine
 
 	// WASM export function handles, cached on creation for performance.
 	fnAlloc               api.Function
@@ -77,7 +82,6 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 		promiseRejectionHandler: opts.promiseRejectionHandler,
 	}
 
-	// Inject *Instance into context so shared host functions can find it.
 	instCtx := context.WithValue(ctx, instanceContextKey{}, inst)
 
 	// Instantiate an anonymous guest module (empty name allows multiple
@@ -120,11 +124,15 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 	}
 
 	// If configured, watch the creation context and auto-close on cancellation.
+	// A derived cancel context lets Close() stop the goroutine if the user
+	// closes the instance before ctx is cancelled (preventing a goroutine leak).
 	if closeOnContextDone {
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		inst.cancelCtx = watchCancel
 		go func() {
-			<-ctx.Done()
+			<-watchCtx.Done()
 			inst.Interrupt()
-			inst.Close(context.Background())
+			inst.module.Close(context.Background())
 		}()
 	}
 
@@ -132,8 +140,6 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 	return inst, nil
 }
 
-// withInstanceCtx returns a context carrying this Instance so shared host
-// functions can dispatch to it.
 func (inst *Instance) withInstanceCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, instanceContextKey{}, inst)
 }
@@ -164,6 +170,9 @@ func (inst *Instance) evalPrelude(ctx context.Context, bytecode []byte) error {
 // Close releases the WASM module and its associated resources. Other
 // instances sharing the same Runtime are unaffected.
 func (inst *Instance) Close(ctx context.Context) error {
+	if inst.cancelCtx != nil {
+		inst.cancelCtx()
+	}
 	return inst.module.Close(ctx)
 }
 
