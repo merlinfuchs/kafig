@@ -671,31 +671,24 @@ func TestCloseOnContextDone(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	inst, err := rt.Instance(ctx, WithRouter(noopRouter()))
+	inst, err := rt.Instance(context.Background(), WithRouter(noopRouter()))
 	if err != nil {
 		t.Fatalf("Instance: %v", err)
 	}
+	t.Cleanup(func() { inst.Close(context.Background()) })
 
-	// Verify the instance works before cancellation.
-	result, err := inst.Eval(context.Background(), `1 + 1`)
-	if err != nil {
-		t.Fatalf("Eval: %v", err)
-	}
-	if string(result) != "2" {
-		t.Errorf("got %s, want 2", result)
-	}
+	// Cancel the call context while a long-running script is executing.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
 
-	// Cancel the context — the instance should auto-close.
-	cancel()
-	time.Sleep(50 * time.Millisecond)
-
-	// After close, Eval should fail.
-	_, err = inst.Eval(context.Background(), `1`)
+	_, err = inst.Eval(ctx, `while(true) {}`)
 	if err == nil {
-		t.Fatal("expected error after context cancellation closed the instance")
+		t.Fatal("expected error after context cancellation")
 	}
-	t.Logf("got expected error after close: %v", err)
+	t.Logf("got expected error: %v", err)
 }
 
 // ─── Bytecode compilation ────────────────────────────────────────────────────

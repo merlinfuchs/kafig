@@ -30,10 +30,9 @@ func instanceFromContext(ctx context.Context) *Instance {
 // All methods must be called from a single goroutine — the WASM module is
 // single-threaded and Instance does not synchronize access internally.
 type Instance struct {
-	module    api.Module
-	router    *RPCRouter
-	logger    *slog.Logger
-	cancelCtx context.CancelFunc // cancels the closeOnContextDone goroutine
+	module api.Module
+	router *RPCRouter
+	logger *slog.Logger
 
 	// WASM export function handles, cached on creation for performance.
 	fnAlloc               api.Function
@@ -74,7 +73,7 @@ type Instance struct {
 	hasResult   bool
 }
 
-func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.CompiledModule, closeOnContextDone bool, opts instanceOptions) (*Instance, error) {
+func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.CompiledModule, opts instanceOptions) (*Instance, error) {
 	inst := &Instance{
 		router:                  opts.router,
 		logger:                  opts.logger,
@@ -123,19 +122,6 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 		inst.logDebug("prelude evaluated")
 	}
 
-	// If configured, watch the creation context and auto-close on cancellation.
-	// A derived cancel context lets Close() stop the goroutine if the user
-	// closes the instance before ctx is cancelled (preventing a goroutine leak).
-	if closeOnContextDone {
-		watchCtx, watchCancel := context.WithCancel(ctx)
-		inst.cancelCtx = watchCancel
-		go func() {
-			<-watchCtx.Done()
-			inst.Interrupt()
-			inst.module.Close(context.Background())
-		}()
-	}
-
 	inst.logDebug("instance created")
 	return inst, nil
 }
@@ -170,9 +156,6 @@ func (inst *Instance) evalPrelude(ctx context.Context, bytecode []byte) error {
 // Close releases the WASM module and its associated resources. Other
 // instances sharing the same Runtime are unaffected.
 func (inst *Instance) Close(ctx context.Context) error {
-	if inst.cancelCtx != nil {
-		inst.cancelCtx()
-	}
 	return inst.module.Close(ctx)
 }
 

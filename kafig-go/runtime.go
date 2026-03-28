@@ -124,7 +124,7 @@ func (r *Runtime) Instance(ctx context.Context, options ...InstanceOption) (*Ins
 		return nil, fmt.Errorf("kafig: RPCRouter is required (use WithRouter)")
 	}
 
-	return newInstance(ctx, r.wazeroRuntime, r.compiled, r.opts.closeOnContextDone, opts)
+	return newInstance(ctx, r.wazeroRuntime, r.compiled, opts)
 }
 
 // Compile compiles JavaScript source to QuickJS bytecode. The bytecode can be

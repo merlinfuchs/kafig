@@ -42,8 +42,11 @@ func WithLogger(logger *slog.Logger) RuntimeOption {
 	return func(o *runtimeOptions) { o.logger = logger }
 }
 
-// WithCloseOnContextDone makes each Instance watch the context passed to
-// Instance() and automatically call SetInterrupt + Close when it is cancelled.
+// WithCloseOnContextDone enables wazero's context-done checking. When enabled,
+// in-flight WASM function calls are terminated if the context passed to Eval,
+// EvalCompiled, or DispatchEvent is cancelled or times out. This is important
+// for running untrusted code — without it, a tight WASM loop could block the
+// goroutine indefinitely. Comes with a small per-call overhead.
 func WithCloseOnContextDone(closeOnContextDone bool) RuntimeOption {
 	return func(o *runtimeOptions) { o.closeOnContextDone = closeOnContextDone }
 }
