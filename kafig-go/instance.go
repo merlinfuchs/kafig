@@ -132,10 +132,10 @@ func newInstance(ctx context.Context, wzRuntime wazero.Runtime, compiled wazero.
 			module.Close(ctx)
 			return nil, err
 		}
-		inst.logDebug("prelude evaluated")
+		inst.logger.Debug("prelude evaluated")
 	}
 
-	inst.logDebug("instance created")
+	inst.logger.Debug("instance created")
 	return inst, nil
 }
 
@@ -378,12 +378,12 @@ func (inst *Instance) serviceRPCLoop(ctx context.Context) error {
 
 		// Feed the result back into WASM (single-threaded).
 		if res.Err != nil {
-			inst.logDebug("rpc rejected", "promise_id", res.PromiseID, "error", res.Err)
+			inst.logger.Debug("rpc rejected", slog.Any("promise_id", res.PromiseID), slog.Any("error", res.Err))
 			if err := inst.rejectRPC(ctx, res.PromiseID, res.Err); err != nil {
 				return fmt.Errorf("kafig: reject rpc (promise %d): %w", res.PromiseID, err)
 			}
 		} else {
-			inst.logDebug("rpc resolved", "promise_id", res.PromiseID)
+			inst.logger.Debug("rpc resolved", slog.Any("promise_id", res.PromiseID))
 			if err := inst.resolveRPC(ctx, res.PromiseID, res.Value); err != nil {
 				return fmt.Errorf("kafig: resolve rpc (promise %d): %w", res.PromiseID, err)
 			}
@@ -513,16 +513,16 @@ func sharedHostPromiseRejection(ctx context.Context, errorJsonPtr, errorJsonLen 
 func (inst *Instance) hostRPC(_ context.Context, methodPtr, methodLen, paramsPtr, paramsLen, promiseID uint32) {
 	method, err := inst.wasmReadString(methodPtr, methodLen)
 	if err != nil {
-		inst.logError("hostRPC: read method failed", "error", err)
+		inst.logger.Error("hostRPC: read method failed", slog.Any("error", err))
 		return
 	}
 	params, err := inst.wasmReadCopy(paramsPtr, paramsLen)
 	if err != nil {
-		inst.logError("hostRPC: read params failed", "error", err)
+		inst.logger.Error("hostRPC: read params failed", slog.Any("error", err))
 		return
 	}
 
-	inst.logDebug("rpc call queued", "method", method, "promise_id", promiseID)
+	inst.logger.Debug("rpc call queued", slog.String("method", method), slog.Any("promise_id", promiseID))
 
 	inst.pendingRPCs = append(inst.pendingRPCs, rpcCall{
 		PromiseID: promiseID,
@@ -541,16 +541,16 @@ func (inst *Instance) hostRPC(_ context.Context, methodPtr, methodLen, paramsPtr
 func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, paramsPtr, paramsLen uint32) uint64 {
 	method, err := inst.wasmReadString(methodPtr, methodLen)
 	if err != nil {
-		inst.logError("hostRPCSync: read method failed", "error", err)
+		inst.logger.Error("hostRPCSync: read method failed", slog.Any("error", err))
 		return 0
 	}
 	params, err := inst.wasmReadCopy(paramsPtr, paramsLen)
 	if err != nil {
-		inst.logError("hostRPCSync: read params failed", "error", err)
+		inst.logger.Error("hostRPCSync: read params failed", slog.Any("error", err))
 		return 0
 	}
 
-	inst.logDebug("sync rpc call", "method", method)
+	inst.logger.Debug("sync rpc call", slog.String("method", method))
 
 	// Look up sync handler, falling back to the catch-all fallback.
 	h, ok := inst.router.syncHandlers[method]
@@ -560,13 +560,13 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 				return inst.router.fallbackHandler(ctx, method, params)
 			})
 			if err != nil {
-				inst.logDebug("sync rpc fallback error", "method", method, "error", err)
+				inst.logger.Debug("sync rpc fallback error", slog.String("method", method), slog.Any("error", err))
 				return inst.writeSyncRPCResult(ctx, 1, []byte(err.Error()))
 			}
 			if result == nil {
 				result = json.RawMessage("null")
 			}
-			inst.logDebug("sync rpc fallback resolved", "method", method)
+			inst.logger.Debug("sync rpc fallback resolved", slog.String("method", method))
 			return inst.writeSyncRPCResult(ctx, 0, result)
 		}
 		return inst.writeSyncRPCResult(ctx, 1,
@@ -578,14 +578,14 @@ func (inst *Instance) hostRPCSync(ctx context.Context, methodPtr, methodLen, par
 		return h(ctx, params)
 	})
 	if err != nil {
-		inst.logDebug("sync rpc error", "method", method, "error", err)
+		inst.logger.Debug("sync rpc error", slog.String("method", method), slog.Any("error", err))
 		return inst.writeSyncRPCResult(ctx, 1, []byte(err.Error()))
 	}
 
 	if result == nil {
 		result = json.RawMessage("null")
 	}
-	inst.logDebug("sync rpc resolved", "method", method)
+	inst.logger.Debug("sync rpc resolved", slog.String("method", method))
 	return inst.writeSyncRPCResult(ctx, 0, result)
 }
 
@@ -595,7 +595,7 @@ func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload 
 	totalLen := 1 + len(payload)
 	ptr, err := inst.wasmAlloc(ctx, totalLen)
 	if err != nil {
-		inst.logError("sync rpc alloc failed", "error", err)
+		inst.logger.Error("sync rpc alloc failed", slog.Any("error", err))
 		return 0
 	}
 
@@ -611,7 +611,7 @@ func (inst *Instance) writeSyncRPCResult(ctx context.Context, tag byte, payload 
 func (inst *Instance) hostSetResult(_ context.Context, resultPtr, resultLen, isError uint32) {
 	resultJSON, err := inst.wasmReadCopy(resultPtr, resultLen)
 	if err != nil {
-		inst.logError("hostSetResult: read failed", "error", err)
+		inst.logger.Error("hostSetResult: read failed", slog.Any("error", err))
 		inst.scriptError = &RuntimeError{Code: ErrorCodeRuntimeError, Message: err.Error()}
 		inst.hasError = true
 		return
@@ -760,30 +760,16 @@ func (inst *Instance) hostPromiseRejection(_ context.Context, errorJsonPtr, erro
 	}
 	errorJSON, err := inst.wasmReadCopy(errorJsonPtr, errorJsonLen)
 	if err != nil {
-		inst.logError("hostPromiseRejection: read failed", "error", err)
+		inst.logger.Error("hostPromiseRejection: read failed", slog.Any("error", err))
 		return 0
 	}
 	jsErr, ok := parseErrorJSON(errorJSON).(*JsError)
 	if !ok {
-		inst.logError("hostPromiseRejection: unexpected error type", "raw", string(errorJSON))
+		inst.logger.Error("hostPromiseRejection: unexpected error type", slog.String("raw", string(errorJSON)))
 		return 0
 	}
 	if inst.promiseRejectionHandler(jsErr) {
 		return 1
 	}
 	return 0
-}
-
-// ─── Logging helpers ─────────────────────────────────────────────────────────
-
-func (inst *Instance) logDebug(msg string, args ...any) {
-	if inst.logger != nil {
-		inst.logger.Debug(msg, args...)
-	}
-}
-
-func (inst *Instance) logError(msg string, args ...any) {
-	if inst.logger != nil {
-		inst.logger.Error(msg, args...)
-	}
 }
