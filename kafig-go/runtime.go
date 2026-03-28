@@ -158,7 +158,9 @@ func (r *Runtime) Close(ctx context.Context) error {
 // to QuickJS bytecode via the compile() export, and returns the bytecode bytes.
 func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bool) ([]byte, error) {
 	// Create a temporary wazero runtime with the shared compilation cache.
-	wzr := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(r.cache))
+	wzr := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		WithCompilationCache(r.cache).
+		WithCloseOnContextDone(r.opts.closeOnContextDone))
 	defer wzr.Close(ctx)
 
 	wasi_snapshot_preview1.MustInstantiate(ctx, wzr)
@@ -189,6 +191,9 @@ func (r *Runtime) compileBytecode(ctx context.Context, source string, isAsync bo
 	fnCompile := module.ExportedFunction("compile")
 	fnAlloc := module.ExportedFunction("alloc")
 	fnDealloc := module.ExportedFunction("dealloc")
+	if fnCompile == nil || fnAlloc == nil || fnDealloc == nil {
+		return nil, fmt.Errorf("WASM module missing required export (compile, alloc, or dealloc)")
+	}
 
 	// Allocate and write source into WASM memory.
 	sourceBytes := []byte(source)
