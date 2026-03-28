@@ -1557,7 +1557,7 @@ func TestErrorStackTraceAsyncThrow(t *testing.T) {
 	if jsErr.Stack == nil {
 		t.Fatal("expected stack trace, got nil")
 	}
-	if !strings.Contains(*jsErr.Stack,"fetchData") {
+	if !strings.Contains(*jsErr.Stack, "fetchData") {
 		t.Errorf("stack trace missing 'fetchData':\n%s", *jsErr.Stack)
 	}
 }
@@ -1592,7 +1592,7 @@ func TestErrorStackTraceDispatchEvent(t *testing.T) {
 	if jsErr.Stack == nil {
 		t.Fatal("expected stack trace, got nil")
 	}
-	if !strings.Contains(*jsErr.Stack,"validate") {
+	if !strings.Contains(*jsErr.Stack, "validate") {
 		t.Errorf("stack trace missing 'validate':\n%s", *jsErr.Stack)
 	}
 }
@@ -1616,7 +1616,7 @@ func TestErrorStackTraceRejectedPromise(t *testing.T) {
 	if jsErr.Stack == nil {
 		t.Fatal("expected stack trace, got nil")
 	}
-	if !strings.Contains(*jsErr.Stack,"failHard") {
+	if !strings.Contains(*jsErr.Stack, "failHard") {
 		t.Errorf("stack trace missing 'failHard':\n%s", *jsErr.Stack)
 	}
 }
@@ -1867,4 +1867,3 @@ func TestDefaultLimitsUnchanged(t *testing.T) {
 		t.Errorf("got %s, want 1048576", result)
 	}
 }
-
